@@ -50,8 +50,8 @@ Paper mode simulates fills against **live** market data (real Chainlink prices, 
 quotes) — it is a real simulation, not fake data. No wallet, no key, no config needed.
 
 ```bash
-git clone https://github.com/nirholas/hood-traders.git
-cd hood-traders
+git clone https://github.com/nirholas/robinhood-chain-trading-bot.git
+cd robinhood-chain-trading-bot
 npm install
 npm run build
 npm run fleet
