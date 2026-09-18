@@ -21,6 +21,7 @@ export async function probeRpc(client: {getChainId():Promise<number>;getBlockNum
 }
 export async function hubHealth(fleet:Fleet,expectedChainId:number,arbitrage?:ArbitrageMonitor) {
   const rpc=await probeRpc(fleet.market.client.public,expectedChainId)
+  const rpcTransport=fleet.market.rpcDiagnostics()
   const journal=fleet.journal.healthProbe()
   let observations:{available:boolean;pendingBridges:number|null;pendingLaunches:number|null}={available:false,pendingBridges:null,pendingLaunches:null}
   if(journal.readable) {
@@ -29,7 +30,7 @@ export async function hubHealth(fleet:Fleet,expectedChainId:number,arbitrage?:Ar
   const arb=arbitrage?.status()
   return {
     ok:rpc.ok&&journal.readable&&journal.writable&&observations.available,
-    observedAt:Date.now(),expectedChainId,rpc,journal,observations,
+    observedAt:Date.now(),expectedChainId,rpc,rpcTransport,journal,observations,
     mode:fleet.config.mode,killed:fleet.kill.isKilled(),
     arbitrage:arb?{configured:true,running:!!arb.running,status:arb.status}:{configured:false,running:false,status:'not-connected'},
   }
