@@ -2,7 +2,23 @@
 
 This is the **backend** component branch of [Robinhood Chain Trading Hub](https://github.com/blablablasealsaresoft/robinhood-trading-hub). Clone into a sibling directory named `robinhood-chain-trading-bot`; follow the main branch README for the full setup.
 
-For the integrated Hub, run `npm ci`, `npm run build`, then **`node dist/hub-main.js`**. This entrypoint binds loopback port 4670, forces paper mode, attaches no bot signer, and starts all strategies stopped. It includes the shared AssetRegistry, manual unsigned swap/wrap preparation, wallet receipt verification, persistent bridge/launch observations and separate dry-run arbitrage adapter. Process environment configures RPC and Journal paths; dotenv is not loaded automatically.
+For the integrated Hub, run `npm ci`, `npm run build`, then **`node dist/hub-main.js`**. This entrypoint binds loopback port 4670, forces paper mode, attaches no bot signer, and starts all strategies stopped. It includes the shared AssetRegistry, manual unsigned swap/wrap preparation, wallet receipt verification, persistent bridge/launch observations, unsigned native launch/sale actions and separate dry-run arbitrage adapter. Native launching requires both HUB_LAUNCH_FACTORY and HUB_LAUNCH_FACTORY_BLOCK for a reviewed deployment. The read-only launch monitor feeds the existing registry and Journal; it does not authorize automatic buys. Process environment configures RPC and Journal paths; dotenv is not loaded automatically.
+
+The local Hub now also includes portfolio value history, reviewed ERC-20 trading (HUB_TRADE_ASSETS), persistent operator bearer authentication (HUB_OPERATOR_TOKEN), and durable paper strategy state. Operator mode disables preview-token authentication. Existing paper trades without compatible snapshots fail closed and require reconciliation; retain the Journal rather than deleting records. These settings belong to the dedicated hub-main entrypoint, not the original live dashboard.
+
+## Published integration checkpoint
+
+PRs #1-#10 were reviewed and integrated with regression fixes. This includes bounded slippage, Journal data used by frontend CSV export, and GET /api/health RPC/Journal diagnostics. Latest recorded validation: **212 unit tests**, typecheck and build passed.
+
+The reviewed mainnet factory is **0xf1981c4b82961a85fdd86c08f3cccb7e2dfc9f43**, block **66613147**. With matching launchpad dependencies installed and npm run compile completed there, start the configured Hub with:
+
+    node scripts/hub-with-launch.mjs
+
+This reads the sibling deployments/4663.json and artifacts, verifies the receipt and runtimes, then imports dist/hub-main.js. HOOD_RPC_URL and HUB_LAUNCHPAD_PATH override defaults. Public RPC failures remain a beta blocker; startup stops on failed verification.
+
+HUBLIFE creation, 0.001 ETH contribution and 1,000-token claim are confirmed; final ETH proceeds withdrawal is unverified. The Hub remains signerless and paper-only for automation. Wallet-scoped history, production sessions/hosting and funded acceptance remain open. See the [beta plan](https://github.com/blablablasealsaresoft/robinhood-trading-hub/blob/main/docs/hub/BETA-LAUNCH-PLAN.md).
+
+The Docker/live-fleet entrypoints below start the original framework, not the complete Hub beta.
 
 The original framework documentation and license follow. Its standalone live-fleet entrypoints are distinct from the Hub preview.
 

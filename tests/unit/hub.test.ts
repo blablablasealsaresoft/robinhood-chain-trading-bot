@@ -18,7 +18,7 @@ function fixture() {
   vi.spyOn(market.client.public, 'getChainId').mockResolvedValue(4663)
   vi.spyOn(market.client.public, 'getGasPrice').mockResolvedValue(1000000000n)
   vi.spyOn(market.client.public, 'estimateGas').mockResolvedValue(150000n)
-  vi.spyOn(market.client.public, 'readContract').mockImplementation(async ({ functionName }) => functionName === 'balanceOf' ? balance : allowance)
+  vi.spyOn(market.client.public, 'readContract').mockImplementation(async ({ functionName }) => functionName === 'balanceOf' ? balance : functionName === 'decimals' ? 18 : allowance)
   vi.spyOn(market, 'quoteBuy').mockImplementation(async (input, output, amount) => ({ amountIn: amount, amountOut: 500000000000000n, gasEstimate: 150000n, route: { path: [input, output], fees: [3000], encodedPath: encodePacked(['address', 'uint24', 'address'], [input, 3000, output]) } }))
   const journal = { recordDecision: vi.fn(() => 1) }
   const service = new ManualSwapService(market, { chainId: 4663, maxSlippageBps: 100, isKilled: () => killed, journal, clock: () => now })
@@ -63,6 +63,20 @@ describe('manual Hub adapter', () => {
     const testnet = new Market({ ...config, network: 'testnet' })
     const service = new ManualSwapService(testnet, { chainId: 46630, maxSlippageBps: 100, isKilled: () => false, journal: f.journal })
     expect(service.registry.list().every(x => x.chainId === 46630 && x.type !== 'stock-token')).toBe(true)
+  })
+  it('quotes an explicitly reviewed ERC20 without enabling unreviewed or Stock Token assets', async () => {
+    const f=fixture()
+    const reviewed=getAddress('0x3333333333333333333333333333333333333333')
+    const service=new ManualSwapService(f.market,{chainId:4663,maxSlippageBps:100,isKilled:()=>false,journal:f.journal,reviewedAssets:[
+      {address:reviewed,symbol:'NEW',name:'Reviewed token',decimals:18,type:'crypto'}
+    ]})
+    const q=await service.quote({...f.params,tokenOut:reviewed})
+    expect(q.tokenOut).toMatchObject({address:reviewed,symbol:'NEW',tradable:true,source:'operator-reviewed'})
+    await expect(service.quote({...f.params,tokenOut:another})).rejects.toMatchObject({code:'ASSET_NOT_ENABLED'})
+    vi.mocked(f.market.client.public.readContract).mockImplementationOnce(async()=>6 as never)
+    await expect(service.quote({...f.params,tokenOut:reviewed})).rejects.toMatchObject({code:'ASSET_METADATA_MISMATCH'})
+    const stock=service.registry.list().find(x=>x.type==='stock-token')!
+    await expect(service.quote({...f.params,tokenOut:stock.address})).rejects.toMatchObject({code:'ASSET_NOT_ENABLED'})
   })
   it('rejects any signer-bearing Market client', () => {
     const f = fixture()

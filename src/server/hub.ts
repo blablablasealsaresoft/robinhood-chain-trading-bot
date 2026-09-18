@@ -1,47 +1,83 @@
+import { hubHealth } from '../hub/health.js'
+import { LaunchpadService } from '../hub/launchpad.js'
 import { BridgeObservations } from '../hub/bridge-observations.js'
 import { NativeWrapService } from '../hub/native-wrap.js'
 import { WalletReceipts } from '../hub/wallet-receipts.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Fleet } from '../framework/fleet.js'
 import { Market } from '../framework/market.js'
 import { HubError, ManualSwapService } from '../hub/manual-swaps.js'
 import { HubReadModel } from '../hub/read-model.js'
 import { LaunchDiscovery } from '../hub/launch-discovery.js'
 import type { ArbitrageMonitor } from '../hub/arbitrage-monitor.js'
+import type { ReviewedTradeAsset } from '../hub/assets.js'
 
-export function createHubHandler(fleet: Fleet, service?: ManualSwapService, options: {arbitrage?: ArbitrageMonitor; llmConfigurationError?: boolean; receipts?:WalletReceipts} = {}) {
+export function createHubHandler(fleet: Fleet, service?: ManualSwapService, options: {arbitrage?: ArbitrageMonitor; llmConfigurationError?: boolean; receipts?:WalletReceipts; reviewedAssets?:ReviewedTradeAsset[]; operatorToken?:string} = {}) {
   const market = new Market(fleet.config)
   const swaps = service ?? new ManualSwapService(market, {
     chainId: fleet.config.network === 'testnet' ? 46630 : 4663,
     maxSlippageBps: fleet.config.defaultLimits.maxSlippageBps,
-    isKilled: () => fleet.kill.isKilled(), journal: fleet.journal,
+    isKilled: () => fleet.kill.isKilled(), journal: fleet.journal, reviewedAssets:options.reviewedAssets,
   })
   const read = new HubReadModel(fleet, market, swaps.registry)
   const discovery = new LaunchDiscovery(market,swaps.registry,fleet.journal)
   const bridges=new BridgeObservations(market,fleet.journal)
   const wraps=new NativeWrapService(market,{chainId:swaps.registry.chainId,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal})
   const receipts=options.receipts ?? new WalletReceipts(market,fleet.journal,swaps.registry.chainId)
+  const factory=process.env.HUB_LAUNCH_FACTORY||process.env.HUB_LAUNCH_FACTORY_ADDRESS
+  if(process.env.HUB_LAUNCH_FACTORY&&process.env.HUB_LAUNCH_FACTORY_ADDRESS&&process.env.HUB_LAUNCH_FACTORY.toLowerCase()!==process.env.HUB_LAUNCH_FACTORY_ADDRESS.toLowerCase())throw new Error('Conflicting Hub factory configuration')
+  const launchpad=new LaunchpadService(market,{chainId:swaps.registry.chainId,factory,deploymentBlock:process.env.HUB_LAUNCH_FACTORY_BLOCK,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal,registry:swaps.registry})
+  receipts.observeWith(event=>launchpad.observeWallet(event))
   const controlToken = randomUUID()
   const controls = fleet.config.mode === 'paper' && !fleet.config.privateKey
+  const operatorToken=validateOperatorToken(options.operatorToken)
+  const authorizedControl=(req:IncomingMessage)=>{
+    if(!controls)return false
+    const preview=req.headers['x-hub-control']
+    if(!operatorToken&&typeof preview==='string'&&preview===controlToken)return true
+    if(!operatorToken)return false
+    const auth=req.headers.authorization
+    if(typeof auth!=='string'||!auth.startsWith('Bearer '))return false
+    return secretEqual(auth.slice(7),operatorToken)
+  }
   const handle=async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-    if (!/^\/api\/(status|assets|quote|swap|wrap|launches|portfolio|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
+    if (!/^\/api\/(status|health|assets|quote|swap|wrap|launches|launchpad(?:\/(?:sales|prepare))?|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
     try {
       const origin = req.headers.origin
       if (origin && new URL(origin).host !== req.headers.host) throw new HubError(403, 'ORIGIN_NOT_ALLOWED', 'Use the configured same-origin Hub API proxy.')
       const path = url.pathname
       if (path === '/api/status' && req.method === 'GET') {
         const summary = fleet.summary()
-        respond(res, 200, { apiVersion: 1, chainId: swaps.registry.chainId, mode: summary.mode, killed: summary.killed, controlToken: controls ? controlToken : null,
-          capabilities: { quote: true, manualSwapPreparation: true, manualBroadcast: false, nativeWrap: true, walletReceiptVerification: true, bridgeObservation: true, launchJournal: true, portfolio: true, stockPricing: true, stockTrading: false, strategyControl: controls } })
+        respond(res, 200, { apiVersion: 1, chainId: swaps.registry.chainId, mode: summary.mode, killed: summary.killed, controlToken: controls && !operatorToken ? controlToken : null,
+          operatorAuthConfigured: !!operatorToken, operatorAuthenticated: !!operatorToken && authorizedControl(req),
+          capabilities: { quote: true, manualSwapPreparation: true, manualBroadcast: false, nativeWrap: true, walletReceiptVerification: true, bridgeObservation: true, launchJournal: true, launchpad: true, portfolio: true, stockPricing: true, stockTrading: false, strategyControl: controls } })
+      } else if (path === '/api/health' && req.method === 'GET') {
+        const report=await hubHealth(fleet,swaps.registry.chainId,options.arbitrage)
+        respond(res,report.ok?200:503,report)
       } else if (path === '/api/assets' && req.method === 'GET') {
         respond(res, 200, { chainId: swaps.registry.chainId, assets: swaps.registry.list() })
+      } else if(path === '/api/launchpad' && req.method === 'GET') {
+        respond(res,200,await launchpad.status())
+      } else if(path === '/api/launchpad/sales' && req.method === 'GET') {
+        respond(res,200,await launchpad.list(url.searchParams.get('account')))
+      } else if(path === '/api/launchpad/prepare' && req.method === 'POST') {
+        respond(res,200,await launchpad.prepare(await readBody(req)))
       } else if (path === '/api/launches' && req.method === 'GET') {
-        respond(res,200,await discovery.recent())
+        const [sdkResult,hubResult]=await Promise.allSettled([discovery.recent(),launchpad.recent()])
+        if(sdkResult.status==='rejected'&&hubResult.status==='rejected')throw sdkResult.reason
+        const sdk=sdkResult.status==='fulfilled'?sdkResult.value as {launches:Array<{blockNumber:string|bigint}>}:null
+        const local=hubResult.status==='fulfilled'?hubResult.value:[]
+        const launches=[...local,...(sdk?.launches??[])].sort((a,b)=>BigInt(String(a.blockNumber))>BigInt(String(b.blockNumber))?-1:BigInt(String(a.blockNumber))<BigInt(String(b.blockNumber))?1:0).slice(0,48)
+        respond(res,200,{chainId:swaps.registry.chainId,observedAt:Date.now(),lookbackBlocks:'30000',source:'hoodchain + Hub LaunchFactory',launches,
+          incomplete:sdkResult.status==='rejected'||hubResult.status==='rejected',
+          coverage:'Recent SDK launches and configured Hub sales. Unavailable sources are marked partial; discovery never grants trading permission.'})
       } else if (path === '/api/portfolio' && req.method === 'GET') {
         respond(res, 200, await read.portfolio(url.searchParams.get('account')))
+      } else if (path === '/api/portfolio/history' && req.method === 'GET') {
+        respond(res,200,read.portfolioHistory(url.searchParams.get('account'),Number(url.searchParams.get('hours')??24),Number(url.searchParams.get('limit')??288)))
       } else if (path === '/api/positions' && req.method === 'GET') {
-        respond(res, 200, { positions: read.positions(), scope: 'current-process', mode: fleet.config.mode })
+        respond(res, 200, { positions: read.positions(), scope: fleet.config.mode === 'paper' ? 'persisted-paper-state' : 'current-process', mode: fleet.config.mode })
       } else if (path === '/api/activity' && req.method === 'GET') {
         respond(res, 200, { events: read.activity() })
       } else if (path === '/api/risk' && req.method === 'GET') {
@@ -51,9 +87,11 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
       } else if (path.startsWith('/api/strategies') && req.method === 'GET') {
         const strategies = read.strategies()
         if (path === '/api/strategies') respond(res, 200, { strategies, services: [
+          launchpad.monitorStatus(),
           ...(strategies.some(s=>s.strategy==='llm-strategist') ? [] : [{ id: 'llm', name: 'LLM strategist', status: options.llmConfigurationError?'configuration-error':'not-configured', detail: 'Uses the existing provider configuration. Set HOOD_LLM_PROVIDER and HOOD_LLM_API_KEY on the backend to make this strategy available.' }]),
           options.arbitrage?.status() ?? { id: 'arbitrage', name: 'RobinFun / Uniswap v4 arbitrage', status: 'not-connected', detail: 'The separate worker adapter is not configured for this service.' },
         ] })
+        else if(path === '/api/strategies/launch-monitor') respond(res,200,{service:launchpad.monitorStatus()})
         else if(path === '/api/strategies/arbitrage' && options.arbitrage) respond(res,200,{service:options.arbitrage.status()})
         else {
           const strategy = strategies.find(a => a.id === path.split('/')[3])
@@ -61,7 +99,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
           respond(res, 200, { strategy })
         }
       } else if ((path === '/api/kill' || /^\/api\/strategies\/[^/]+\/(start|stop)$/.test(path)) && req.method === 'POST') {
-        if (!controls || req.headers['x-hub-control'] !== controlToken) throw new HubError(403, 'CONTROL_DISABLED', 'A local paper-control session is required. Live control is not enabled.')
+        if (!authorizedControl(req)) throw new HubError(403, 'CONTROL_DISABLED', operatorToken ? 'An authenticated operator session is required.' : 'A local paper-control session is required. Live control is not enabled.')
         const body = await readBody(req)
         if (Object.keys(body).length) throw new HubError(400, 'UNEXPECTED_FIELD', 'This control accepts an empty JSON object.')
         if (path === '/api/kill') { fleet.tripKill('Hub operator halted the paper fleet'); fleet.stop(); await options.arbitrage?.stop(); respond(res, 200, { killed: true, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null }) }
@@ -101,7 +139,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     }
     return true
   }
-  return Object.assign(handle,{startObservations:()=>{bridges.start();discovery.start()},stopObservations:async()=>{await Promise.all([bridges.stop(),discovery.stop()])}})
+  return Object.assign(handle,{startObservations:()=>{bridges.start();discovery.start();launchpad.start()},stopObservations:async()=>{await Promise.all([bridges.stop(),discovery.stop(),launchpad.stop()])}})
 }
 export function respond(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
@@ -122,4 +160,14 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error()
     return body as Record<string, unknown>
   } catch { throw new HubError(400, 'INVALID_JSON', 'Provide a JSON object.') }
+}
+
+function validateOperatorToken(value:string|undefined):string|undefined {
+  if(value===undefined||value==='')return undefined
+  if(value.length<32||value.length>256||/[\r\n]/.test(value))throw new Error('HUB_OPERATOR_TOKEN must be 32-256 characters without line breaks')
+  return value
+}
+function secretEqual(value:string,expected:string):boolean {
+  const a=Buffer.from(value),b=Buffer.from(expected)
+  return a.length===b.length&&timingSafeEqual(a,b)
 }

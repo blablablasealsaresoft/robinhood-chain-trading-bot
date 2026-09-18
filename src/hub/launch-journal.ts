@@ -11,7 +11,7 @@ export class LaunchJournal {
  constructor(private market:Market,private registry:AssetRegistry,private journal:Journal){
   for(const e of journal.externalEvents('launch',200,registry.chainId).reverse()){
    const asset=e.data.asset as Asset|null
-   if(e.status==='confirmed'&&asset&&asset.chainId===registry.chainId)this.registry.registerDiscovered(asset)
+   if(e.source.startsWith('hoodchain/')&&e.status==='confirmed'&&asset&&asset.chainId===registry.chainId)this.registry.registerDiscovered(asset)
   }
  }
  async observe(launch:Launch,asset:Asset|null):Promise<ExternalEventRecord>{
@@ -42,7 +42,7 @@ export class LaunchJournal {
   return event
  }
  async recheck(){
-  for(const event of this.journal.dueExternalEvents('launch',Date.now(),10)){
+  for(const event of this.journal.dueExternalEvents('launch',Date.now(),10,['hoodchain/noxa','hoodchain/odyssey'])){
    this.journal.deferExternalEvent(event.id,Date.now()+60000)
    const saved=event.data.launch as Omit<Launch,'blockNumber'>&{blockNumber:string}
    try{await this.observe({...saved,blockNumber:BigInt(saved.blockNumber)},event.data.asset as Asset|null)}

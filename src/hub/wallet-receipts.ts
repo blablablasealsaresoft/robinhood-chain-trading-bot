@@ -5,6 +5,10 @@ import type { Journal, WalletActivityRecord } from '../framework/journal.js'
 import { HubError } from './manual-swaps.js'
 
 export class WalletReceipts {
+  private observer?: (event:WalletActivityRecord)=>Promise<void>
+  observeWith(observer:(event:WalletActivityRecord)=>Promise<void>){this.observer=observer}
+  private async record(event:WalletActivityRecord){this.journal.recordWalletActivity(event);try{await this.observer?.(event)}catch{/* Discovery retries independently; receipt status remains authoritative. */}return event}
+
 
   private timer: ReturnType<typeof setInterval>|null=null
   private refresh: Promise<void>|null=null
@@ -66,7 +70,7 @@ export class WalletReceipts {
     catch(error) {
       if(prior && missing(error,'TransactionNotFoundError')) {
         const event={...prior,status:'unverified' as const,observedAt:now}
-        this.journal.recordWalletActivity(event);return event
+        return this.record(event)
       }
       if(missing(error,'TransactionNotFoundError'))throw new HubError(404,'TRANSACTION_PENDING','The RPC has not indexed this transaction yet. Retry later.')
       throw error
@@ -87,8 +91,7 @@ export class WalletReceipts {
         event.status=receipt.status==='reverted'?'reverted':head-receipt.blockNumber+1n>=2n?'confirmed':'confirming'
       } else event.status='unverified'
     }
-    this.journal.recordWalletActivity(event)
-    return event
+    return this.record(event)
   }
 }
 function missing(error:unknown,name:string):boolean {

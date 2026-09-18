@@ -9,6 +9,7 @@ import { PremiumWatch } from './strategies/premium-watch.js'
 import { LlmStrategist } from './strategies/llm-strategist.js'
 import { ArbitrageMonitor } from './hub/arbitrage-monitor.js'
 import { createHubHandler, respond } from './server/hub.js'
+import { parseReviewedTradeAssets } from './hub/assets.js'
 
 // Keep user-wallet preparation and autonomous execution on separate signing paths.
 const config = { ...loadFleetConfig(), mode: 'paper' as const, privateKey: undefined, hasWallet: false }
@@ -28,7 +29,8 @@ fleet.kill.onKill(()=>{void arbitrage?.stop().catch(()=>console.error('Arbitrage
 fleet.kill.arm()
 const receipts=new WalletReceipts(fleet.market,fleet.journal,config.network==='testnet'?46630:4663)
 receipts.start()
-const handle = createHubHandler(fleet,undefined,{arbitrage,llmConfigurationError,receipts})
+const reviewedAssets=parseReviewedTradeAssets(process.env.HUB_TRADE_ASSETS)
+const handle = createHubHandler(fleet,undefined,{arbitrage,llmConfigurationError,receipts,reviewedAssets,operatorToken:process.env.HUB_OPERATOR_TOKEN})
 handle.startObservations()
 const server = createServer(async (req, res) => {
   if (!await handle(req, res, new URL(req.url ?? '/', 'http://localhost'))) respond(res,404,{error:{code:'NOT_AVAILABLE',message:'Unknown Hub API endpoint.'}})

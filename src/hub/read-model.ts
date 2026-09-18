@@ -8,6 +8,9 @@ import { HubError } from './manual-swaps.js'
 export class HubReadModel {
   private stocksCache = new Map<string, { at: number; value: unknown }>()
   private stocksPending = new Map<string, Promise<unknown>>()
+  private tokenPriceCache = new Map<string,{at:number;value:{price:number;source:string}|null}>()
+  private tokenPricePending = new Map<string,Promise<{price:number;source:string}|null>>()
+  private probeCursor=0
   constructor(private fleet: Fleet, private market: Market, private registry: AssetRegistry) {}
   async checkChain() {
     if (await this.market.client.public.getChainId() !== this.registry.chainId) throw new HubError(503, 'CHAIN_MISMATCH', 'The RPC returned a different network.')
@@ -41,21 +44,28 @@ export class HubReadModel {
 
     const wallets=this.fleet.journal.recentWalletActivity(100).map(event=>({
       id:'wallet:'+event.chainId+':'+event.txHash,at:event.at,type:event.kind,source:'user-wallet',mode:'wallet',
-      title:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':'WETH unwrapped to ETH',
+      title:event.kind.startsWith('launch-')?({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[event.kind]:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':'WETH unwrapped to ETH',
       detail:'Chain '+event.chainId+' · '+event.account+' · '+(event.blockNumber?'Block '+event.blockNumber:'Awaiting receipt'),
       status:event.status,txHash:event.txHash,chainId:event.chainId,owner:event.account,verifiedAt:event.observedAt,
     }))
 
 
     const observations=[...this.fleet.journal.externalEvents('bridge',100),...this.fleet.journal.externalEvents('launch',100)].map(event=>({
-      id:event.id,at:event.at,type:event.type,source:event.source,mode:event.type==='launch'?'discovery':'wallet',title:event.title,detail:event.detail,status:event.status,txHash:event.txHash,
+      id:event.id,at:event.at,type:event.type,source:event.source==='hub-launchpad'&&wallets.some(w=>w.txHash===event.txHash)?'user-wallet':event.source,mode:event.source==='hub-launchpad'&&wallets.some(w=>w.txHash===event.txHash)?'wallet':event.type==='launch'?'discovery':'wallet',title:event.title,detail:event.detail,status:event.status,txHash:event.txHash,
       chainId:event.type==='bridge'?(event.data.reference as {fromChainId:number}).fromChainId:event.chainId,owner:event.owner,
       verifiedAt:event.verification==='unverified'?undefined:event.observedAt,observedAt:event.observedAt,verification:event.verification,
       link:event.type==='bridge'?'https://scan.li.fi/tx/'+encodeURIComponent(event.txHash):'https://robinhoodchain.blockscout.com/tx/'+event.txHash,
       receivingHash:event.type==='bridge'?event.data.receivingHash:null,
     }))
 
-    return [...trades, ...decisions, ...wallets, ...observations].sort((a,b) => b.at-a.at).slice(0,100)
+    const all=[...trades,...decisions,...wallets,...observations]
+    const merged=new Map<string,typeof all[number]>()
+    const checked=(e:typeof all[number])=>'observedAt' in e?e.observedAt:'verifiedAt' in e?e.verifiedAt??0:0
+    for(const event of all){
+      const key=event.source==='user-wallet'&&event.txHash&&'chainId' in event?'wallet:'+event.chainId+':'+event.txHash.toLowerCase():event.id
+      const prior=merged.get(key);if(!prior||checked(event)>=checked(prior))merged.set(key,event)
+    }
+    return [...merged.values()].sort((a,b)=>b.at-a.at).slice(0,100)
   }
   async stock(symbol: string) {
     const token = this.registry.list().find(a => a.type === 'stock-token' && a.symbol === symbol.toUpperCase())
@@ -79,6 +89,39 @@ export class HubReadModel {
     this.stocksPending.set(token.symbol, request)
     return request
   }
+  private async tokenSpotPrice(asset:{address:Address;decimals:number}):Promise<{price:number;source:string}|null> {
+    const key=asset.address.toLowerCase(),cached=this.tokenPriceCache.get(key)
+    if(cached&&Date.now()-cached.at<30_000)return cached.value
+    const pending=this.tokenPricePending.get(key);if(pending)return pending
+    const request=(async()=>{
+      const spot=await this.market.spotPrice(asset.address,asset.decimals).catch(()=>null)
+      const value=spot&&Number.isFinite(spot.priceUsd)&&spot.priceUsd>0?
+        {price:spot.priceUsd,source:spot.via==='usdg'?'DEX token/USDG probe':'DEX token/WETH → USDG probe'}:null
+      this.tokenPriceCache.delete(key)
+      this.tokenPriceCache.set(key,{at:Date.now(),value})
+      while(this.tokenPriceCache.size>400)this.tokenPriceCache.delete(this.tokenPriceCache.keys().next().value!)
+      return value
+    })().finally(()=>this.tokenPricePending.delete(key))
+    this.tokenPricePending.set(key,request)
+    return request
+  }
+  portfolioHistory(raw:string|null,hours=24,limit=288) {
+    if (!raw || !isAddress(raw) || /^0x0{40}$/i.test(raw)) throw new HubError(400, 'INVALID_ACCOUNT', 'Enter a valid public wallet address.')
+    if(!Number.isFinite(hours)||hours<1||hours>720)throw new HubError(400,'INVALID_HOURS','History hours must be between 1 and 720.')
+    if(!Number.isInteger(limit)||limit<2||limit>2000)throw new HubError(400,'INVALID_LIMIT','History limit must be between 2 and 2000.')
+    const account=getAddress(raw)
+    const points=this.fleet.journal.portfolioSnapshots(this.registry.chainId,account,Date.now()-hours*3_600_000,limit)
+    const first=points[0]??null,last=points.at(-1)??null
+    const changeUsd=points.length>=2&&first&&last?last.pricedValueUsd-first.pricedValueUsd:null
+    const changePct=points.length>=2&&first&&last&&first.pricedValueUsd>0?changeUsd!/first.pricedValueUsd*100:null
+    return {
+      account,chainId:this.registry.chainId,hours,points, observedFrom:first?.observedAt??null,observedTo:last?.observedAt??null,
+      changeUsd,changePct,
+      incomplete:points.some(point=>point.incomplete),
+      metric:'observed-priced-value-change',
+      note:'Value change is based on Hub portfolio snapshots. It is not cost basis, realized P&L, tax P&L, or proof of investment performance.',
+    }
+  }
   async portfolio(raw: string | null) {
     if (!raw || !isAddress(raw) || /^0x0{40}$/i.test(raw)) throw new HubError(400, 'INVALID_ACCOUNT', 'Enter a valid public wallet address.')
     const account = getAddress(raw)
@@ -95,20 +138,47 @@ export class HubReadModel {
       asset: nativeAsset, balance: native?.toString() ?? null, priceUsd: ethPrice, valueUsd: native !== null && ethPrice !== null ? Number(formatUnits(native,18))*ethPrice : null,
       priceSource: 'WETH/USDG probe', balanceStatus: native === null ? 'unavailable' : 'read',
     }]
+    const heldNonStock=assets.map((asset,i)=>({asset,i,balance:balances[i]?.status==='success'?balances[i]!.result as bigint:null}))
+      .filter(x=>x.balance!==null&&x.balance>0n&&x.asset.type!=='stock-token'&&x.asset.address.toLowerCase()!==this.market.weth.toLowerCase()&&x.asset.address.toLowerCase()!==this.market.usdg.toLowerCase())
+    const maxSpotProbes=24
+    const spotPrices=new Map<string,{price:number;source:string}|null>()
+    const misses=heldNonStock.filter(x=>{
+      const key=x.asset.address.toLowerCase(),cached=this.tokenPriceCache.get(key)
+      if(cached&&Date.now()-cached.at<30000){spotPrices.set(key,cached.value);return false}
+      return true
+    })
+    const start=misses.length?this.probeCursor%misses.length:0
+    const selected=[...misses.slice(start),...misses.slice(0,start)].slice(0,maxSpotProbes)
+    this.probeCursor=misses.length?(start+selected.length)%misses.length:0
+    for(let offset=0;offset<selected.length;offset+=4){
+      const priced=await Promise.all(selected.slice(offset,offset+4).map(async x=>[x.asset.address.toLowerCase(),await this.tokenSpotPrice(x.asset)] as const))
+      for(const [key,value] of priced)spotPrices.set(key,value)
+    }
     for (let i=0; i<assets.length; i++) {
       const asset = assets[i]!, result = balances[i]
       const balance = result?.status === 'success' ? result.result as bigint : null
-      let price = asset.symbol === 'WETH' ? ethPrice : asset.symbol === 'USDG' ? 1 : null
-      if (asset.type === 'stock-token' && balance !== null && balance > 0n) price = (await this.market.stockChainlinkPrice(asset.symbol))?.priceUsd ?? null
+      let price:number|null = asset.address.toLowerCase() === this.market.weth.toLowerCase() ? ethPrice : asset.address.toLowerCase() === this.market.usdg.toLowerCase() ? 1 : null
+      let priceSource = asset.address.toLowerCase() === this.market.weth.toLowerCase() ? 'WETH/USDG probe' : asset.address.toLowerCase() === this.market.usdg.toLowerCase() ? 'USDG valued at $1 (assumption)' : 'Unavailable'
+      if (asset.type === 'stock-token' && balance !== null && balance > 0n) {
+        price = (await this.market.stockChainlinkPrice(asset.symbol))?.priceUsd ?? null
+        priceSource='Chainlink price per token'
+      } else if(balance!==null&&balance>0n&&price===null&&asset.type!=='stock-token') {
+        const spot=spotPrices.get(asset.address.toLowerCase())
+        if(spot){price=spot.price;priceSource=spot.source}
+        else if(!spotPrices.has(asset.address.toLowerCase()))priceSource='Valuation probe limit reached'
+        else priceSource='No liquid USD route'
+      }
       holdings.push({ asset, balance: balance?.toString() ?? null, priceUsd: price,
         valueUsd: balance === 0n ? 0 : balance !== null && price !== null ? Number(formatUnits(balance,asset.decimals))*price : null,
-        priceSource: asset.type === 'stock-token' ? 'Chainlink price per token' : asset.symbol === 'USDG' ? 'USDG valued at $1 (assumption)' : 'WETH/USDG probe',
+        priceSource,
         balanceStatus: balance === null ? 'unavailable' : 'read' })
     }
-    return { account, chainId: this.registry.chainId, blockNumber: blockNumber.toString(), observedAt: Date.now(), holdings,
-      pricedValueUsd: holdings.reduce((sum,h) => sum+(h.valueUsd ?? 0),0),
-      incomplete: holdings.some(h => h.balance === null || (h.balance !== '0' && h.valueUsd === null)),
+    const observedAt=Date.now(),pricedValueUsd=holdings.reduce((sum,h)=>sum+(h.valueUsd??0),0)
+    const incomplete=holdings.some(h=>h.balance===null||(h.balance!=='0'&&h.valueUsd===null))
+    this.fleet.journal.recordPortfolioSnapshot({chainId:this.registry.chainId,account,observedAt,blockNumber:blockNumber.toString(),pricedValueUsd,incomplete})
+    return { account, chainId: this.registry.chainId, blockNumber: blockNumber.toString(), observedAt, holdings,
+      pricedValueUsd,incomplete,
       walletPnlUsd: null, positions: this.positions(), botSummary: this.fleet.summary(),
-      coverage: 'Native ETH and the Hub asset registry only. Bot positions are separate and are not added to wallet value.' }
+      coverage: 'Native ETH and the Hub asset registry only. Held non-stock ERC-20s use bounded live DEX probes when available. Bot positions are separate and are not added to wallet value.' }
   }
 }

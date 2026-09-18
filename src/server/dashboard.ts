@@ -76,9 +76,6 @@ export function createDashboardServer(fleet: Fleet, staticRoot: string): Server 
       fleet.tripKill('dashboard')
       return json(res, 200, { killed: true, reason: 'dashboard' })
     }
-    if (url.pathname === '/api/health' && req.method === 'GET') {
-      return json(res, 200, { ok: true })
-    }
 
     // Preserve the original dashboard routes, especially its emergency stop.
     if (await handleHub(req, res, url)) return

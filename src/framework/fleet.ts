@@ -56,6 +56,10 @@ export class Fleet {
     this.journal = new Journal(config.dbPath)
     this.kill = new KillSwitch(config.killFile)
     this.market = new Market(config, this.account ?? undefined)
+    if(config.mode==='paper'){
+      this.spentDay=utcDayStart(Date.now())
+      this.fleetSpentTodayUsd=this.journal.paperSpentSince(this.spentDay)
+    }
   }
 
   /** Build agents from specs. */
@@ -65,6 +69,8 @@ export class Fleet {
       this.agents.push(
         new Agent({
           id: spec.id,
+          stateScope: this.config.network+':'+this.market.usdg.toLowerCase(),
+          restoreFleetSpend: false,
           strategy: spec.strategy,
           market: this.market,
           limits,

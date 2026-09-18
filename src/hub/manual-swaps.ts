@@ -3,7 +3,7 @@ import { buildSwapTx, erc20Abi, type SwapQuote } from 'hoodchain'
 import { encodeFunctionData, getAddress, isAddress, zeroAddress, type Address } from 'viem'
 import type { Market } from '../framework/market.js'
 import type { Journal } from '../framework/journal.js'
-import { AssetRegistry } from './assets.js'
+import { AssetRegistry, type ReviewedTradeAsset } from './assets.js'
 import type { HubQuote, PreparedSwap } from './types.js'
 
 export class HubError extends Error {
@@ -12,6 +12,7 @@ export class HubError extends Error {
 export interface ManualSwapOptions {
   chainId: number; maxSlippageBps: number; isKilled: () => boolean
   journal: Pick<Journal, 'recordDecision'> & Partial<Pick<Journal, 'recordWalletPlan'>>; clock?: () => number
+  reviewedAssets?: ReviewedTradeAsset[]
 }
 type QuoteEntry = { response: HubQuote; quote: SwapQuote }
 const UINT256_MAX = (1n << 256n) - 1n
@@ -25,6 +26,7 @@ export class ManualSwapService {
     if (![4663, 46630].includes(options.chainId)) throw new Error('Unsupported Hub chain')
     if (!Number.isInteger(options.maxSlippageBps) || options.maxSlippageBps < 0 || options.maxSlippageBps >= 10000) throw new Error('Invalid manual slippage cap')
     this.registry = new AssetRegistry(options.chainId, market)
+    for(const asset of options.reviewedAssets??[])this.registry.registerReviewed(asset)
     this.clock = options.clock ?? Date.now
   }
   private guard(): void {
@@ -33,6 +35,13 @@ export class ManualSwapService {
   private async network(): Promise<void> {
     if (await this.market.client.public.getChainId() !== this.options.chainId) throw new HubError(409, 'CHAIN_MISMATCH', 'The RPC is not on the configured chain.')
   }
+  private async verifyReviewedAsset(asset:HubQuote['tokenIn']):Promise<void> {
+    if(asset.source!=='operator-reviewed')return
+    let decimals:unknown
+    try { decimals=await this.market.client.public.readContract({address:asset.address,abi:erc20Abi,functionName:'decimals'}) }
+    catch { throw new HubError(422,'ASSET_METADATA_UNVERIFIED','The reviewed token metadata could not be verified onchain.') }
+    if(Number(decimals)!==asset.decimals)throw new HubError(409,'ASSET_METADATA_MISMATCH','The reviewed token decimals do not match the onchain contract.')
+  }
   async quote(input: Record<string, unknown>): Promise<HubQuote> {
     exactFields(input, ['chainId', 'tokenIn', 'tokenOut', 'amountIn', 'account', 'slippageBps'])
     this.guard()
@@ -40,7 +49,7 @@ export class ManualSwapService {
     const account = address(input.account, 'account')
     const tokenIn = this.registry.get(address(input.tokenIn, 'tokenIn'))
     const tokenOut = this.registry.get(address(input.tokenOut, 'tokenOut'))
-    if (!tokenIn?.tradable || !tokenOut?.tradable) throw new HubError(403, 'ASSET_NOT_ENABLED', 'Manual swaps currently support the reviewed WETH/USDG asset set. Stock acquisition requires a wallet-specific eligibility integration.')
+    if (!tokenIn?.tradable || !tokenOut?.tradable) throw new HubError(403, 'ASSET_NOT_ENABLED', 'This asset is not in the manual trading allowlist. Stock acquisition requires a wallet-specific eligibility integration.')
     if (tokenIn.id === tokenOut.id) throw new HubError(400, 'SAME_ASSET', 'Choose two different assets.')
     if (typeof input.amountIn !== 'string' || !/^[1-9]\d{0,77}$/.test(input.amountIn) || BigInt(input.amountIn) > UINT256_MAX) throw new HubError(400, 'INVALID_AMOUNT', 'amountIn must be a positive uint256 base-unit string.')
     const rawSlippage = input.slippageBps ?? String(Math.min(50, this.options.maxSlippageBps))
@@ -48,6 +57,8 @@ export class ManualSwapService {
     const slippageBps = Number(rawSlippage)
     if (slippageBps > this.options.maxSlippageBps) throw new HubError(400, 'SLIPPAGE_CAP', 'Slippage exceeds the configured ' + this.options.maxSlippageBps + ' bps cap.')
     await this.network()
+    await Promise.all([this.verifyReviewedAsset(tokenIn),this.verifyReviewedAsset(tokenOut)])
+    this.guard()
     const quote = await this.market.quoteBuy(tokenIn.address, tokenOut.address, BigInt(input.amountIn))
     this.guard()
     if (!quote || quote.amountOut <= 0n) throw new HubError(422, 'NO_ROUTE', 'No liquid route is available for this pair and amount.')

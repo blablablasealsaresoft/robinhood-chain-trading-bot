@@ -6,7 +6,7 @@ import { getAddress } from 'viem'
 import { getRecentLaunches } from 'hoodchain'
 import { ArbitrageMonitor, monitorEnvironment } from '../../src/hub/arbitrage-monitor.js'
 import { LaunchDiscovery } from '../../src/hub/launch-discovery.js'
-import { AssetRegistry } from '../../src/hub/assets.js'
+import { AssetRegistry, parseReviewedTradeAssets } from '../../src/hub/assets.js'
 import type { Market } from '../../src/framework/market.js'
 vi.mock('hoodchain',async original=>({...await original<object>(),getRecentLaunches:vi.fn()}))
 const weth=getAddress('0x1111111111111111111111111111111111111111')
@@ -66,4 +66,27 @@ describe('separate arbitrage monitor',()=>{
    expect(journal.recordDecision).toHaveBeenCalledTimes(2)
   } finally {await monitor.stop();rmSync(repo,{recursive:true,force:true})}
  },10000)
+})
+
+
+describe('reviewed manual trade assets',()=>{
+ it('parses a bounded operator allowlist and registers assets as tradable',()=>{
+  const assets=parseReviewedTradeAssets(JSON.stringify([{address:token,symbol:'new',name:'New token',decimals:18,type:'launch-token'}]))
+  const registry=new AssetRegistry(4663,market())
+  const added=registry.registerReviewed(assets[0]!)
+  expect(added).toMatchObject({address:token,symbol:'NEW',type:'launch-token',source:'operator-reviewed',tradable:true})
+ })
+ it('fails closed on duplicate, malformed and Stock Token entries',()=>{
+  expect(()=>parseReviewedTradeAssets('{')).toThrow('valid JSON')
+  expect(()=>parseReviewedTradeAssets(JSON.stringify([{address:token,symbol:'NEW',name:'New',decimals:18,type:'stock-token'}]))).toThrow('cannot enable Stock Tokens')
+  expect(()=>parseReviewedTradeAssets(JSON.stringify([
+   {address:token,symbol:'NEW',name:'New',decimals:18},
+   {address:token,symbol:'NEW2',name:'New 2',decimals:18},
+  ]))).toThrow('duplicate')
+  expect(()=>parseReviewedTradeAssets(JSON.stringify([{address:token,symbol:'BAD SYMBOL',name:'New',decimals:18}]))).toThrow('symbol is invalid')
+ })
+ it('does not let reviewed metadata override protected registry assets',()=>{
+  const registry=new AssetRegistry(4663,market())
+  expect(()=>registry.registerReviewed({address:weth,symbol:'FAKE',name:'Fake WETH',decimals:18,type:'crypto'})).toThrow('metadata conflicts')
+ })
 })

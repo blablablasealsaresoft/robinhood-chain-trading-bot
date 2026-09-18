@@ -16,7 +16,7 @@ import type { DecisionRecord, EquityPoint, TradeRecord } from './types.js'
 
 export interface WalletPlanRecord {
   id: string; chainId: number; account: string; createdAt: number; expiresAt: number
-  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'; to: string; data: string; value: string }[]
+  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'|'launch-create'|'launch-contribute'|'launch-claim'|'launch-refund'|'launch-proceeds'|'launch-remainder'; to: string; data: string; value: string }[]
 }
 export interface WalletActivityRecord {
   planId: string; chainId: number; account: string; txHash: string
@@ -26,11 +26,27 @@ export interface WalletActivityRecord {
 }
 
 
+export interface AgentStateRecord {
+  version:1; agentId:string; strategyId:string; mode:'paper'; updatedAt:number
+  lastTradeId?:number; stateScope?:string
+  spentDay:number; spentTodayUsd:number; lastTradeAt:number|null; realizedUsd:number
+  ticks:number; trades:number; refusals:number; lastTickAt:number|null
+  positions:Array<{
+    token:string; tokenSymbol:string; amount:string; costBasis:string; investedUsd:number
+    quoteToken:string; quoteSymbol:string; openedAt:number; markUsd:number|null; meta:Record<string,unknown>
+  }>
+}
+
 export interface ExternalEventRecord {
   id:string; type:'bridge'|'launch'; source:string; chainId:number; txHash:string
   owner:string|null; at:number; observedAt:number; status:string
   verification:'unverified'|'provider'|'provider-and-receipt'|'chain-event'
   title:string; detail:string; data:Record<string,unknown>
+}
+
+export interface PortfolioSnapshotRecord {
+  chainId:number; account:string; observedAt:number; blockNumber:string
+  pricedValueUsd:number; incomplete:boolean
 }
 
 export class Journal {
@@ -63,6 +79,20 @@ export class Journal {
         PRIMARY KEY(chain_id, tx_hash)
       );
       CREATE INDEX IF NOT EXISTS idx_wallet_activity_observed ON wallet_activity(observed_at);
+
+      CREATE TABLE IF NOT EXISTS agent_state (
+        agent_id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        chain_id INTEGER NOT NULL, account TEXT NOT NULL, block_number TEXT NOT NULL,
+        observed_at INTEGER NOT NULL, priced_value_usd REAL NOT NULL, incomplete INTEGER NOT NULL,
+        PRIMARY KEY(chain_id, account, block_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_account_time
+        ON portfolio_snapshots(chain_id, account, observed_at);
+
+      CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_time ON portfolio_snapshots(observed_at);
 
       CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,6 +202,26 @@ export class Journal {
     return rows.reduce((sum, r) => sum + Number(BigInt(r.amount_in)) / 1e6, 0)
   }
 
+  paperSpentSince(sinceMs:number):number {
+    const rows=this.db.prepare("SELECT meta FROM trades WHERE mode='paper' AND side='buy' AND ts>=?").all(sinceMs) as {meta:string}[]
+    return rows.reduce((sum,row)=>{
+      const value=JSON.parse(row.meta).notionalUsd
+      if(typeof value!=='number'||!Number.isFinite(value)||value<0)throw new Error('Paper spend history requires reconciliation: missing notional')
+      return sum+value
+    },0)
+  }
+
+  latestTradeId(agentId:string,mode:'paper'|'live'):number {
+    return (this.db.prepare('SELECT COALESCE(MAX(id),0) AS id FROM trades WHERE agent_id=? AND mode=?').get(agentId,mode) as {id:number}).id
+  }
+
+  latestTradeTimestamp(agentId:string,mode?:'paper'|'live'):number|null {
+    const row=mode
+      ? this.db.prepare('SELECT MAX(ts) AS ts FROM trades WHERE agent_id=? AND mode=?').get(agentId,mode) as {ts:number|null}
+      : this.db.prepare('SELECT MAX(ts) AS ts FROM trades WHERE agent_id=?').get(agentId) as {ts:number|null}
+    return row.ts??null
+  }
+
   recentTrades(agentId: string, limit = 50): TradeRecord[] {
     const rows = this.db
       .prepare(`SELECT * FROM trades WHERE agent_id=? ORDER BY ts DESC LIMIT ?`)
@@ -225,6 +275,15 @@ export class Journal {
   }
 
 
+  recordAgentState(state:AgentStateRecord):void {
+    this.db.prepare('INSERT INTO agent_state(agent_id,updated_at,payload) VALUES (?,?,?) ON CONFLICT(agent_id) DO UPDATE SET updated_at=excluded.updated_at,payload=excluded.payload')
+      .run(state.agentId,state.updatedAt,JSON.stringify(state))
+  }
+  agentState(agentId:string):AgentStateRecord|null {
+    const row=this.db.prepare('SELECT payload FROM agent_state WHERE agent_id=?').get(agentId) as {payload:string}|undefined
+    return row?JSON.parse(row.payload) as AgentStateRecord:null
+  }
+
   /** Prepared actions are server-owned; browser reports cannot change recipient/calldata. */
   recordWalletPlan(plan: WalletPlanRecord): void {
     this.db.prepare('DELETE FROM wallet_plans WHERE expires_at < ? AND id NOT IN (SELECT plan_id FROM wallet_activity)').run(Date.now()-86_400_000)
@@ -252,6 +311,35 @@ export class Journal {
   }
 
 
+  recordPortfolioSnapshot(snapshot:PortfolioSnapshotRecord):void {
+    const account=snapshot.account.toLowerCase()
+    if(!Number.isFinite(snapshot.pricedValueUsd)||snapshot.pricedValueUsd<0)throw new Error('Invalid portfolio value')
+    this.db.prepare(`INSERT INTO portfolio_snapshots
+      (chain_id,account,block_number,observed_at,priced_value_usd,incomplete)
+      VALUES (?,?,?,?,?,?)
+      ON CONFLICT(chain_id,account,block_number) DO UPDATE SET
+        observed_at=excluded.observed_at,
+        priced_value_usd=excluded.priced_value_usd,
+        incomplete=excluded.incomplete
+      WHERE portfolio_snapshots.incomplete=1 OR excluded.incomplete=0`)
+      .run(snapshot.chainId,account,snapshot.blockNumber,snapshot.observedAt,snapshot.pricedValueUsd,snapshot.incomplete?1:0)
+    this.db.prepare('DELETE FROM portfolio_snapshots WHERE observed_at<?').run(snapshot.observedAt-30*86400000)
+    this.db.prepare('DELETE FROM portfolio_snapshots WHERE rowid IN (SELECT rowid FROM portfolio_snapshots WHERE chain_id=? AND account=? ORDER BY observed_at DESC LIMIT -1 OFFSET 10000)').run(snapshot.chainId,account)
+    this.db.prepare('DELETE FROM portfolio_snapshots WHERE rowid IN (SELECT rowid FROM portfolio_snapshots ORDER BY observed_at DESC LIMIT -1 OFFSET 100000)').run()
+  }
+  portfolioSnapshots(chainId:number,account:string,sinceMs:number,limit=288):PortfolioSnapshotRecord[] {
+    const bounded=Math.max(1,Math.min(2000,Math.trunc(limit)))
+    const rows=this.db.prepare(`SELECT chain_id,account,block_number,observed_at,priced_value_usd,incomplete
+      FROM portfolio_snapshots
+      WHERE chain_id=? AND account=? AND observed_at>=?
+      ORDER BY observed_at DESC LIMIT ?`)
+      .all(chainId,account.toLowerCase(),sinceMs,bounded) as Array<Record<string,unknown>>
+    return rows.reverse().map(row=>({
+      chainId:Number(row.chain_id),account:String(row.account),blockNumber:String(row.block_number),
+      observedAt:Number(row.observed_at),pricedValueUsd:Number(row.priced_value_usd),incomplete:Boolean(row.incomplete),
+    }))
+  }
+
   recordExternalEvent(event:ExternalEventRecord,nextCheckAt=Number.MAX_SAFE_INTEGER):void {
     this.db.prepare('INSERT INTO external_events(id,type,chain_id,status,observed_at,next_check_at,payload) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at,next_check_at=excluded.next_check_at,payload=excluded.payload')
       .run(event.id,event.type,event.chainId,event.status,event.observedAt,nextCheckAt,JSON.stringify(event))
@@ -264,8 +352,9 @@ export class Journal {
     const rows=this.db.prepare('SELECT payload FROM external_events WHERE type=? AND (? IS NULL OR chain_id=?) ORDER BY observed_at DESC LIMIT ?').all(type,chainId??null,chainId??null,Math.min(200,Math.max(1,limit))) as {payload:string}[]
     return rows.map(row=>JSON.parse(row.payload))
   }
-  dueExternalEvents(type:'bridge'|'launch',now:number,limit=10):ExternalEventRecord[] {
-    const rows=this.db.prepare('SELECT payload FROM external_events WHERE type=? AND next_check_at<=? ORDER BY next_check_at ASC LIMIT ?').all(type,now,limit) as {payload:string}[]
+  dueExternalEvents(type:'bridge'|'launch',now:number,limit=10,sources?:string[]):ExternalEventRecord[] {
+    const filter=sources?.length?' AND json_extract(payload, \'$.source\') IN ('+sources.map(()=>'?').join(',')+')':''
+    const rows=this.db.prepare('SELECT payload FROM external_events WHERE type=? AND next_check_at<=?'+filter+' ORDER BY next_check_at ASC LIMIT ?').all(type,now,...(sources??[]),limit) as {payload:string}[]
     return rows.map(row=>JSON.parse(row.payload))
   }
   deferExternalEvent(id:string,until:number):void {
@@ -273,6 +362,21 @@ export class Journal {
   }
   pendingExternalCount(type:'bridge'|'launch'):number {
     return (this.db.prepare('SELECT COUNT(*) AS n FROM external_events WHERE type=? AND next_check_at<?').get(type,Number.MAX_SAFE_INTEGER) as {n:number}).n
+  }
+
+  healthProbe(): { readable:boolean; writable:boolean } {
+    try { this.db.prepare('SELECT id FROM decisions LIMIT 1').get() } catch { return {readable:false,writable:false} }
+    let writable=false
+    try {
+      this.db.exec('SAVEPOINT hub_health')
+      this.db.prepare("INSERT INTO decisions(agent_id,ts,kind,detail,meta) VALUES ('hub:health',0,'observe','health probe','{}')").run()
+      this.db.exec('ROLLBACK TO hub_health')
+      this.db.exec('RELEASE hub_health')
+      writable=true
+    } catch {
+      try { this.db.exec('ROLLBACK TO hub_health'); this.db.exec('RELEASE hub_health') } catch { /* closed or unavailable database */ }
+    }
+    return {readable:true,writable}
   }
 
   close(): void {

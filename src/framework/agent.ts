@@ -1,6 +1,6 @@
 import { formatUnits, type Account, type Address, type Hash } from 'viem'
 import { buildSwapTx, ensureApproval, type SwapQuote } from 'hoodchain'
-import type { Journal } from './journal.js'
+import type { AgentStateRecord, Journal } from './journal.js'
 import type { Market } from './market.js'
 import { RiskEngine, utcDayStart } from './risk.js'
 import type { KillSwitch } from './kill.js'
@@ -34,6 +34,8 @@ export interface AgentOptions {
   tickIntervalMs: number
   /** Injected clock, for tests. Defaults to `Date.now`. */
   clock?: () => number
+  stateScope?: string
+  restoreFleetSpend?: boolean
 }
 
 const DUST = 1_000n // token smallest-units below which a position is considered closed
@@ -85,6 +87,7 @@ export class Agent {
     this.kill = opts.kill
     this.account = opts.account
     this.clock = opts.clock ?? Date.now
+    if(this.mode==='paper')this.restoreState()
   }
 
   /** Begin the tick loop and wire the strategy's stream subscriptions. */
@@ -129,6 +132,7 @@ export class Agent {
         this.recordEquity(now)
         this.ticks++
         this.lastTickAt = now
+        this.persistState(now)
         return
       }
 
@@ -150,6 +154,7 @@ export class Agent {
       this.ticks++
       this.lastTickAt = now
       this.lastError = null
+      this.persistState(now)
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err)
       this.journal.recordDecision({
@@ -288,7 +293,8 @@ export class Agent {
       gasEstimate: sim.gasEstimate,
       meta: { ...(intent.meta ?? {}), notionalUsd: round(notionalUsd), minOut: minOut.toString() },
     }
-    this.journal.recordTrade(trade)
+    const tradeId=this.journal.recordTrade(trade)
+    this.lastTradeId=tradeId
     this.trades++
     this.lastTradeAt = now
     this.applyFill(intent, amountOut, notionalUsd, now)
@@ -296,6 +302,7 @@ export class Agent {
       this.spentTodayUsd += notionalUsd
       this.opts.reportFleetSpend(notionalUsd)
     }
+    this.persistState(now)
   }
 
   private async executeLive(
@@ -403,6 +410,65 @@ export class Agent {
       this.spentDay = day
       this.spentTodayUsd = 0
     }
+  }
+
+  private lastTradeId=0
+  private get stateScope():string { return this.opts.stateScope ?? "paper:"+this.market.usdg.toLowerCase() }
+
+  private restoreState():void {
+    const saved=this.journal.agentState(this.id)
+    const latestId=this.journal.latestTradeId(this.id,'paper')
+    if(!saved) {
+      if(latestId>0)throw new Error('Persisted paper agent state is missing for '+this.id+'; existing trades require reconciliation.')
+      return
+    }
+    if(saved.version!==1||saved.mode!=='paper'||saved.agentId!==this.id||saved.strategyId!==this.strategy.id)throw new Error('Persisted paper agent state is incompatible for '+this.id)
+    if(saved.lastTradeId!==latestId)throw new Error('Persisted paper agent state is stale for '+this.id)
+    if(saved.stateScope!==this.stateScope)throw new Error('Persisted paper agent state scope is incompatible for '+this.id)
+    if(!Number.isSafeInteger(saved.updatedAt)||saved.updatedAt<0||!Array.isArray(saved.positions)||
+      !(saved.lastTradeAt===null||Number.isSafeInteger(saved.lastTradeAt)&&saved.lastTradeAt>=0)||
+      !(saved.lastTickAt===null||Number.isSafeInteger(saved.lastTickAt)&&saved.lastTickAt>=0))throw new Error('Persisted paper agent state is invalid for '+this.id)
+    this.lastTradeId=latestId
+    if(!Number.isFinite(saved.realizedUsd)||!Number.isFinite(saved.spentTodayUsd)||saved.spentTodayUsd<0||!Number.isInteger(saved.spentDay)||
+      !Number.isInteger(saved.ticks)||saved.ticks<0||!Number.isInteger(saved.trades)||saved.trades<0||!Number.isInteger(saved.refusals)||saved.refusals<0)throw new Error('Persisted paper agent state is invalid for '+this.id)
+    const now=this.clock(),today=utcDayStart(now)
+    this.realizedUsd=saved.realizedUsd
+    this.lastTradeAt=saved.lastTradeAt
+    this.ticks=saved.ticks
+    this.trades=saved.trades
+    this.refusals=saved.refusals
+    this.lastTickAt=saved.lastTickAt
+    this.spentDay=today
+    this.spentTodayUsd=saved.spentDay===today?saved.spentTodayUsd:0
+    this.positions.clear()
+    for(const raw of saved.positions){
+      if(!/^0x[0-9a-fA-F]{40}$/.test(raw.token)||!/^0x[0-9a-fA-F]{40}$/.test(raw.quoteToken)||!/^\d+$/.test(raw.amount)||!/^\d+$/.test(raw.costBasis)||
+        !Number.isFinite(raw.investedUsd)||raw.investedUsd<0||!Number.isInteger(raw.openedAt)||raw.openedAt<0||
+        !(raw.markUsd===null||Number.isFinite(raw.markUsd)))throw new Error('Persisted paper position is invalid for '+this.id)
+      const position:Position={
+        token:raw.token as Address,tokenSymbol:raw.tokenSymbol,amount:BigInt(raw.amount),costBasis:BigInt(raw.costBasis),
+        investedUsd:raw.investedUsd,quoteToken:raw.quoteToken as Address,quoteSymbol:raw.quoteSymbol,
+        openedAt:raw.openedAt,markUsd:raw.markUsd,meta:raw.meta??{},
+      }
+      if(this.positions.has(position.token.toLowerCase()))throw new Error('Duplicate persisted paper position for '+this.id)
+      if(position.amount>DUST)this.positions.set(position.token.toLowerCase(),position)
+    }
+    if(this.spentTodayUsd>0&&this.opts.restoreFleetSpend!==false)this.opts.reportFleetSpend(this.spentTodayUsd)
+  }
+
+  private persistState(now=this.clock()):void {
+    if(this.mode!=='paper')return
+    const state:AgentStateRecord={
+      version:1,agentId:this.id,strategyId:this.strategy.id,mode:'paper',updatedAt:now,lastTradeId:this.lastTradeId,stateScope:this.stateScope,
+      spentDay:this.spentDay,spentTodayUsd:round(this.spentTodayUsd),lastTradeAt:this.lastTradeAt,realizedUsd:round(this.realizedUsd),
+      ticks:this.ticks,trades:this.trades,refusals:this.refusals,lastTickAt:this.lastTickAt,
+      positions:[...this.positions.values()].map(p=>({
+        token:p.token,tokenSymbol:p.tokenSymbol,amount:p.amount.toString(),costBasis:p.costBasis.toString(),
+        investedUsd:p.investedUsd,quoteToken:p.quoteToken,quoteSymbol:p.quoteSymbol,openedAt:p.openedAt,
+        markUsd:p.markUsd,meta:p.meta,
+      })),
+    }
+    this.journal.recordAgentState(state)
   }
 
   /** Live status snapshot for the dashboard API. */
