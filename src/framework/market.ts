@@ -13,7 +13,7 @@ import {
 } from 'hoodchain'
 import { formatUnits, parseUnits, type Account, type Address } from 'viem'
 import type { FleetConfig } from './config.js'
-import { createReliableRpc, type RpcDiagnosticsSnapshot } from './rpc.js'
+import { getSharedReliableRpc, type RpcDiagnosticsSnapshot } from './rpc.js'
 
 /** A memecoin/token spot price sourced from live Uniswap v3 liquidity. */
 export interface SpotPrice {
@@ -43,7 +43,7 @@ export class Market {
   private readonly rpcDiagnosticsReader:()=>RpcDiagnosticsSnapshot
 
   constructor(config: FleetConfig, account?: Account) {
-    const rpc=createReliableRpc({
+    const rpc=getSharedReliableRpc({
       network:config.network,
       primaryUrl:config.rpcUrl,
       fallbackUrls:config.rpcFallbackUrls,
