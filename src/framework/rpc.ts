@@ -80,6 +80,30 @@ function normalizedUrls(options:ReliableRpcOptions):string[] {
   return unique
 }
 
+export type ReliableRpc={
+  transport:Transport
+  request:(args:RpcArgs)=>Promise<unknown>
+  diagnostics:()=>RpcDiagnosticsSnapshot
+}
+
+const sharedRpc=new Map<string,ReliableRpc>()
+
+export function getSharedReliableRpc(options:ReliableRpcOptions):ReliableRpc {
+  const key=JSON.stringify({
+    network:options.network,
+    primaryUrl:options.primaryUrl??null,
+    fallbackUrls:options.fallbackUrls??[],
+    maxConcurrency:options.maxConcurrency??8,
+    readRetries:options.readRetries??1,
+    timeoutMs:options.timeoutMs??8000,
+  })
+  const existing=sharedRpc.get(key)
+  if(existing)return existing
+  const created=createReliableRpc(options)
+  sharedRpc.set(key,created)
+  return created
+}
+
 export function createReliableRpc(options:ReliableRpcOptions):{
   transport:Transport
   request:(args:RpcArgs)=>Promise<unknown>
@@ -162,7 +186,7 @@ export function createReliableRpc(options:ReliableRpcOptions):{
           requests++
           const value=await raw(endpoint,args)
           endpoint.failures=0;endpoint.lastError=null;endpoint.cooldownUntil=0
-          if(activeEndpoint!==null&&activeEndpoint!==index)failovers++
+          if((index>0||activeEndpoint!==null)&&activeEndpoint!==index)failovers++
           activeEndpoint=index
           return value
         }catch(error){
@@ -211,7 +235,7 @@ export function createReliableRpc(options:ReliableRpcOptions):{
 
   const provider={request}
   return {
-    transport:custom(provider),
+    transport:custom(provider,{retryCount:0}),
     request,
     diagnostics:()=>({
       activeEndpoint,
