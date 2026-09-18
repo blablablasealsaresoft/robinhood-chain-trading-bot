@@ -6,6 +6,14 @@ import type { LlmClientConfig, LlmProvider } from './llm.js'
 export interface FleetConfig {
   network: HoodNetwork
   rpcUrl: string | undefined
+  /** Optional fallback RPCs used only for read-only calls. */
+  rpcFallbackUrls?: string[]
+  /** Shared RPC request concurrency cap. */
+  rpcMaxConcurrency?: number
+  /** Per-endpoint retries for safe/read-only RPC calls. */
+  rpcReadRetries?: number
+  /** Per-request RPC timeout. */
+  rpcTimeoutMs?: number
   mode: Mode
   /** Set true only when HOOD_TRADERS_LIVE=1 AND a key is present. */
   hasWallet: boolean
@@ -53,6 +61,10 @@ export function loadFleetConfig(env: NodeJS.ProcessEnv = process.env): FleetConf
   return {
     network,
     rpcUrl: env.HOOD_RPC_URL || undefined,
+    rpcFallbackUrls: (env.HOOD_RPC_FALLBACK_URLS || '').split(',').map(x=>x.trim()).filter(Boolean),
+    rpcMaxConcurrency: num('HOOD_RPC_MAX_CONCURRENCY',8),
+    rpcReadRetries: num('HOOD_RPC_READ_RETRIES',1),
+    rpcTimeoutMs: num('HOOD_RPC_TIMEOUT_MS',8000),
     mode,
     hasWallet: hasKey,
     privateKey: hasKey ? privateKey : undefined,
