@@ -154,6 +154,8 @@ export function createReliableRpc(options:ReliableRpcOptions):{
         endpoint.failures++;endpoint.lastError=errorLabel(error);last=error
         if(endpoint.wrongChain)continue
         if(!(error as {retryable?:boolean}).retryable)throw error
+        endpoint.cooldownUntil=Date.now()+Math.min(30_000,1_000*Math.max(1,endpoint.failures))
+        continue
       }
       for(let attempt=0;attempt<=readRetries;attempt++){
         try{
