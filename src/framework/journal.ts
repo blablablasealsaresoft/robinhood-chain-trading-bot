@@ -13,6 +13,26 @@ import type { DecisionRecord, EquityPoint, TradeRecord } from './types.js'
  * stored as decimal TEXT — SQLite integers are 64-bit signed and token amounts
  * routinely exceed that, so TEXT is the only lossless option.
  */
+
+export interface WalletPlanRecord {
+  id: string; chainId: number; account: string; createdAt: number; expiresAt: number
+  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'; to: string; data: string; value: string }[]
+}
+export interface WalletActivityRecord {
+  planId: string; chainId: number; account: string; txHash: string
+  kind: WalletPlanRecord['actions'][number]['kind']
+  status: 'submitted'|'confirming'|'confirmed'|'reverted'|'unverified'
+  at: number; observedAt: number; blockNumber: string|null; blockHash: string|null
+}
+
+
+export interface ExternalEventRecord {
+  id:string; type:'bridge'|'launch'; source:string; chainId:number; txHash:string
+  owner:string|null; at:number; observedAt:number; status:string
+  verification:'unverified'|'provider'|'provider-and-receipt'|'chain-event'
+  title:string; detail:string; data:Record<string,unknown>
+}
+
 export class Journal {
   private readonly db: Database.Database
 
@@ -26,6 +46,24 @@ export class Journal {
 
   private migrate(): void {
     this.db.exec(`
+
+
+      CREATE TABLE IF NOT EXISTS external_events (
+        id TEXT PRIMARY KEY, type TEXT NOT NULL, chain_id INTEGER NOT NULL, status TEXT NOT NULL,
+        observed_at INTEGER NOT NULL, next_check_at INTEGER NOT NULL, payload TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_external_due ON external_events(type,next_check_at);
+
+      CREATE TABLE IF NOT EXISTS wallet_plans (
+        id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, payload TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS wallet_activity (
+        chain_id INTEGER NOT NULL, tx_hash TEXT NOT NULL, plan_id TEXT NOT NULL,
+        observed_at INTEGER NOT NULL, payload TEXT NOT NULL,
+        PRIMARY KEY(chain_id, tx_hash)
+      );
+      CREATE INDEX IF NOT EXISTS idx_wallet_activity_observed ON wallet_activity(observed_at);
+
       CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         agent_id TEXT NOT NULL,
@@ -178,6 +216,63 @@ export class Journal {
       .prepare(`SELECT * FROM trades ORDER BY ts DESC LIMIT ?`)
       .all(limit) as Record<string, unknown>[]
     return rows.map(rowToTrade)
+  }
+
+  allRecentDecisions(limit = 100): DecisionRecord[] {
+    const rows = this.db.prepare('SELECT * FROM decisions ORDER BY ts DESC LIMIT ?').all(limit) as Record<string, unknown>[]
+    return rows.map(r => ({ id: r.id as number, agentId: r.agent_id as string, ts: r.ts as number,
+      kind: r.kind as DecisionRecord['kind'], detail: r.detail as string, meta: JSON.parse((r.meta as string) || '{}') }))
+  }
+
+
+  /** Prepared actions are server-owned; browser reports cannot change recipient/calldata. */
+  recordWalletPlan(plan: WalletPlanRecord): void {
+    this.db.prepare('DELETE FROM wallet_plans WHERE expires_at < ? AND id NOT IN (SELECT plan_id FROM wallet_activity)').run(Date.now()-86_400_000)
+    const count = this.db.prepare('SELECT COUNT(*) AS n FROM wallet_plans WHERE id NOT IN (SELECT plan_id FROM wallet_activity)').get() as {n:number}
+    if(count.n >= 10000)throw new Error('Wallet plan capacity reached')
+    this.db.prepare('INSERT INTO wallet_plans(id, expires_at, payload) VALUES (?,?,?)').run(plan.id,plan.expiresAt,JSON.stringify(plan))
+  }
+  walletPlan(id: string): WalletPlanRecord | null {
+    const row=this.db.prepare('SELECT payload FROM wallet_plans WHERE id=?').get(id) as {payload:string}|undefined
+    return row ? JSON.parse(row.payload) : null
+  }
+  recordWalletActivity(event: WalletActivityRecord): void {
+    const prior=this.walletActivity(event.chainId,event.txHash)
+    if(prior && prior.planId!==event.planId)throw new Error('Transaction is already associated with a prepared plan')
+    this.db.prepare('INSERT INTO wallet_activity(chain_id,tx_hash,plan_id,observed_at,payload) VALUES (?,?,?,?,?) ON CONFLICT(chain_id,tx_hash) DO UPDATE SET observed_at=excluded.observed_at,payload=excluded.payload')
+      .run(event.chainId,event.txHash.toLowerCase(),event.planId,event.observedAt,JSON.stringify(event))
+  }
+  walletActivity(chainId: number, hash: string): WalletActivityRecord | null {
+    const row=this.db.prepare('SELECT payload FROM wallet_activity WHERE chain_id=? AND tx_hash=?').get(chainId,hash.toLowerCase()) as {payload:string}|undefined
+    return row ? JSON.parse(row.payload) : null
+  }
+  recentWalletActivity(limit=100): WalletActivityRecord[] {
+    const rows=this.db.prepare('SELECT payload FROM wallet_activity ORDER BY observed_at DESC LIMIT ?').all(Math.max(1,Math.min(100,limit))) as {payload:string}[]
+    return rows.map(row=>JSON.parse(row.payload))
+  }
+
+
+  recordExternalEvent(event:ExternalEventRecord,nextCheckAt=Number.MAX_SAFE_INTEGER):void {
+    this.db.prepare('INSERT INTO external_events(id,type,chain_id,status,observed_at,next_check_at,payload) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,observed_at=excluded.observed_at,next_check_at=excluded.next_check_at,payload=excluded.payload')
+      .run(event.id,event.type,event.chainId,event.status,event.observedAt,nextCheckAt,JSON.stringify(event))
+  }
+  externalEvent(id:string):ExternalEventRecord|null {
+    const row=this.db.prepare('SELECT payload FROM external_events WHERE id=?').get(id) as {payload:string}|undefined
+    return row?JSON.parse(row.payload):null
+  }
+  externalEvents(type:'bridge'|'launch',limit=100,chainId?:number):ExternalEventRecord[] {
+    const rows=this.db.prepare('SELECT payload FROM external_events WHERE type=? AND (? IS NULL OR chain_id=?) ORDER BY observed_at DESC LIMIT ?').all(type,chainId??null,chainId??null,Math.min(200,Math.max(1,limit))) as {payload:string}[]
+    return rows.map(row=>JSON.parse(row.payload))
+  }
+  dueExternalEvents(type:'bridge'|'launch',now:number,limit=10):ExternalEventRecord[] {
+    const rows=this.db.prepare('SELECT payload FROM external_events WHERE type=? AND next_check_at<=? ORDER BY next_check_at ASC LIMIT ?').all(type,now,limit) as {payload:string}[]
+    return rows.map(row=>JSON.parse(row.payload))
+  }
+  deferExternalEvent(id:string,until:number):void {
+    this.db.prepare('UPDATE external_events SET next_check_at=? WHERE id=?').run(until,id)
+  }
+  pendingExternalCount(type:'bridge'|'launch'):number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM external_events WHERE type=? AND next_check_at<?').get(type,Number.MAX_SAFE_INTEGER) as {n:number}).n
   }
 
   close(): void {

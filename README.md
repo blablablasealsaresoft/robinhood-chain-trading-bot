@@ -1,3 +1,13 @@
+# Trading Hub backend integration
+
+This is the **backend** component branch of [Robinhood Chain Trading Hub](https://github.com/blablablasealsaresoft/robinhood-trading-hub). Clone into a sibling directory named `robinhood-chain-trading-bot`; follow the main branch README for the full setup.
+
+For the integrated Hub, run `npm ci`, `npm run build`, then **`node dist/hub-main.js`**. This entrypoint binds loopback port 4670, forces paper mode, attaches no bot signer, and starts all strategies stopped. It includes the shared AssetRegistry, manual unsigned swap/wrap preparation, wallet receipt verification, persistent bridge/launch observations and separate dry-run arbitrage adapter. Process environment configures RPC and Journal paths; dotenv is not loaded automatically.
+
+The original framework documentation and license follow. Its standalone live-fleet entrypoints are distinct from the Hub preview.
+
+---
+
 # hood-traders
 
 [![Run on Google Cloud](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run?git_repo=https://github.com/nirholas/robinhood-chain-trading-bot)
