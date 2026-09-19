@@ -71,7 +71,7 @@ export class StockCompliancePolicy {
     if(!fractional)throw new StockComplianceError('STOCK_CAPABILITY_UNAVAILABLE','Robinhood RHJ trading capabilities are unavailable for this Stock Token.')
     if(direction==='acquire'&&!['tradable','position_opening_only'].includes(fractional))
       throw new StockComplianceError('STOCK_OPENING_UNAVAILABLE','Robinhood RHJ trading capabilities do not currently permit opening this fractional Stock Token position.')
-    if(direction==='dispose'&&fractional==='position_opening_only')
+    if(direction==='dispose'&&!['tradable','position_closing_only'].includes(fractional))
       throw new StockComplianceError('STOCK_CLOSING_UNAVAILABLE','Robinhood RHJ trading capabilities do not currently permit closing this fractional Stock Token position.')
     if(direction==='acquire'&&allDay==='position_closing_only')
       throw new StockComplianceError('STOCK_OPENING_UNAVAILABLE','Robinhood RHJ all-day capability is currently closing-only for this Stock Token.')
@@ -130,8 +130,8 @@ export function parseAttestations(raw:string|undefined):StockComplianceAttestati
       if(typeof row[k]!=='boolean')throw new Error('Stock compliance attestation '+index+' '+k+' must be boolean')
     if(!Number.isSafeInteger(row.verifiedAt)||Number(row.verifiedAt)<0||!Number.isSafeInteger(row.expiresAt)||Number(row.expiresAt)<=Number(row.verifiedAt))
       throw new Error('Stock compliance attestation '+index+' timestamps are invalid')
-    return {account,nonUsPerson:row.nonUsPerson,jurisdictionEligible:row.jurisdictionEligible,appropriatenessPassed:row.appropriatenessPassed,
-      riskDisclosuresAccepted:row.riskDisclosuresAccepted,taxCertificationComplete:row.taxCertificationComplete,verifiedAt:Number(row.verifiedAt),expiresAt:Number(row.expiresAt)}
+    return {account,nonUsPerson:row.nonUsPerson as boolean,jurisdictionEligible:row.jurisdictionEligible as boolean,appropriatenessPassed:row.appropriatenessPassed as boolean,
+      riskDisclosuresAccepted:row.riskDisclosuresAccepted as boolean,taxCertificationComplete:row.taxCertificationComplete as boolean,verifiedAt:Number(row.verifiedAt),expiresAt:Number(row.expiresAt)}
   })
 }
 
