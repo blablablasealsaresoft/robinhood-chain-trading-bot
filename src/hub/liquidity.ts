@@ -33,7 +33,7 @@ export class LiquidityService {
     if(this.options.chainId!==4663)throw new HubError(422,'LIQUIDITY_NETWORK','Manual launch liquidity is enabled only on Robinhood Chain mainnet.')
     if(typeof rawToken!=='string'||!isAddress(rawToken)||rawToken.toLowerCase()===zeroAddress)throw new HubError(400,'INVALID_TOKEN','Choose a valid launch token.')
     const token=getAddress(rawToken),asset=this.registry.get(token)
-    if(!asset||asset.type!=='launch-token')throw new HubError(422,'LAUNCH_TOKEN_REQUIRED','Liquidity inspection is limited to verified Hub launch tokens.')
+    if(!asset||asset.type!=='launch-token'||asset.source!=='hub-launchpad')throw new HubError(422,'LAUNCH_TOKEN_REQUIRED','Liquidity inspection is limited to verified Hub launch tokens.')
     const rpc=this.market.client.public
     if(await rpc.getChainId()!==4663)throw new HubError(503,'CHAIN_MISMATCH','Liquidity RPC network mismatch.')
     const pools=[]
@@ -62,7 +62,7 @@ export class LiquidityService {
     if(typeof input.token!=='string'||!isAddress(input.token)||input.token.toLowerCase()===zeroAddress)throw new HubError(400,'INVALID_TOKEN','Choose a valid launch token.')
     const account=getAddress(input.account),token=getAddress(input.token),asset=this.registry.get(token)
     if(asset?.type==='stock-token')throw new HubError(422,'STOCK_TOKEN_BLOCKED','Stock Tokens cannot use launch liquidity.')
-    if(!asset||asset.type!=='launch-token')throw new HubError(422,'LAUNCH_TOKEN_REQUIRED','Liquidity creation is limited to verified Hub launch tokens.')
+    if(!asset||asset.type!=='launch-token'||asset.source!=='hub-launchpad')throw new HubError(422,'LAUNCH_TOKEN_REQUIRED','Liquidity creation is limited to verified Hub launch tokens.')
     const tokenAmount=uint(input.tokenAmount,'token amount'),wethAmount=uint(input.wethAmount,'WETH amount')
     const fee=Number(input.fee)
     if(!Number.isInteger(fee)||!V3_FEE_TIERS.includes(fee as (typeof V3_FEE_TIERS)[number]))throw new HubError(400,'INVALID_FEE','Choose a supported Uniswap v3 fee tier.')
