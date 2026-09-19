@@ -4,13 +4,13 @@ import { dirname } from 'node:path'
 import type { DecisionRecord, EquityPoint, TradeRecord } from './types.js'
 
 /**
- * The decision journal — the agent's black box recorder. Every observe, every
+ * The decision journal â€” the agent's black box recorder. Every observe, every
  * refusal, every trade (paper or live), and every equity mark lands here so the
  * dashboard can answer "why did this trade fire?" and the whole run is auditable
  * after the fact.
  *
  * SQLite via better-sqlite3 (synchronous, zero-config, embedded). bigints are
- * stored as decimal TEXT — SQLite integers are 64-bit signed and token amounts
+ * stored as decimal TEXT â€” SQLite integers are 64-bit signed and token amounts
  * routinely exceed that, so TEXT is the only lossless option.
  */
 
@@ -204,7 +204,7 @@ export class Journal {
          WHERE agent_id=? AND ts>=? AND side='buy' AND quote_symbol=?`,
       )
       .all(agentId, sinceMs, quoteSymbol) as { amount_in: string }[]
-    // amount_in is USDG (6dp) smallest units → dollars
+    // amount_in is USDG (6dp) smallest units â†’ dollars
     return rows.reduce((sum, r) => sum + Number(BigInt(r.amount_in)) / 1e6, 0)
   }
 
@@ -266,7 +266,7 @@ export class Journal {
     }))
   }
 
-  /** All trades across every agent, newest first — for the fleet-wide feed. */
+  /** All trades across every agent, newest first â€” for the fleet-wide feed. */
   allRecentTrades(limit = 100): TradeRecord[] {
     const rows = this.db
       .prepare(`SELECT * FROM trades ORDER BY ts DESC LIMIT ?`)
@@ -374,7 +374,7 @@ export class Journal {
     const keyExpr="'external:' || id"
     const atExpr="CAST(json_extract(payload,'$.at') AS INTEGER)"
     const cursor=before?' AND ('+atExpr+' < ? OR ('+atExpr+' = ? AND '+keyExpr+' < ?))':''
-    const sql='SELECT payload,'+atExpr+' AS at,'+keyExpr+' AS page_key FROM external_events WHERE lower(json_extract(payload,\'$.owner\'))=? AND NOT EXISTS (SELECT 1 FROM wallet_activity wa WHERE lower(json_extract(wa.payload,\'$.account\'))=? AND lower(wa.tx_hash)=lower(external_events.tx_hash))'+cursor+' ORDER BY at DESC,page_key DESC LIMIT ?'
+    const sql='SELECT payload,'+atExpr+' AS at,'+keyExpr+' AS page_key FROM external_events WHERE lower(json_extract(payload,\'$.owner\'))=? AND NOT EXISTS (SELECT 1 FROM wallet_activity wa WHERE lower(json_extract(wa.payload,\'$.account\'))=? AND wa.chain_id=external_events.chain_id AND lower(wa.tx_hash)=lower(json_extract(external_events.payload,\'$.txHash\')))'+cursor+' ORDER BY at DESC,page_key DESC LIMIT ?'
     const rows=this.db.prepare(sql).all(account,account,...(before?[before.at,before.at,before.key]:[]),bounded) as {payload:string;at:number;page_key:string}[]
     return rows.map(row=>({value:JSON.parse(row.payload),at:Number(row.at),pageKey:row.page_key}))
   }
