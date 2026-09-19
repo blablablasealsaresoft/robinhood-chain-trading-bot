@@ -16,7 +16,7 @@ import type { DecisionRecord, EquityPoint, TradeRecord } from './types.js'
 
 export interface WalletPlanRecord {
   id: string; chainId: number; account: string; createdAt: number; expiresAt: number
-  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'|'launch-create'|'launch-contribute'|'launch-claim'|'launch-refund'|'launch-proceeds'|'launch-remainder'; to: string; data: string; value: string }[]
+  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'|'launch-create'|'launch-contribute'|'launch-claim'|'launch-refund'|'launch-proceeds'|'launch-remainder'|'liquidity-add'; to: string; data: string; value: string }[]
 }
 export interface WalletActivityRecord {
   planId: string; chainId: number; account: string; txHash: string

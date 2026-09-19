@@ -44,7 +44,7 @@ export class HubReadModel {
 
     const wallets=this.fleet.journal.recentWalletActivity(100).map(event=>({
       id:'wallet:'+event.chainId+':'+event.txHash,at:event.at,type:event.kind,source:'user-wallet',mode:'wallet',
-      title:event.kind.startsWith('launch-')?({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[event.kind]:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':'WETH unwrapped to ETH',
+      title:event.kind.startsWith('launch-')?({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[event.kind]:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':event.kind==='unwrap'?'WETH unwrapped to ETH':'Liquidity added',
       detail:'Chain '+event.chainId+' · '+event.account+' · '+(event.blockNumber?'Block '+event.blockNumber:'Awaiting receipt'),
       status:event.status,txHash:event.txHash,chainId:event.chainId,owner:event.account,verifiedAt:event.observedAt,
     }))
@@ -77,7 +77,7 @@ export class HubReadModel {
     const candidates:Array<{event:any;at:number;pageKey:string}>=[]
     for(const row of this.fleet.journal.walletActivityPage(account,take,cursor)){
       const event=row.value
-      const title=event.kind.startsWith('launch-')?({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[event.kind]:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':'WETH unwrapped to ETH'
+      const title=event.kind.startsWith('launch-')?({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[event.kind]:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':event.kind==='unwrap'?'WETH unwrapped to ETH':'Liquidity added'
       candidates.push({at:row.at,pageKey:row.pageKey,event:{
         id:'wallet:'+event.chainId+':'+event.txHash,at:event.at,type:event.kind,source:'user-wallet',mode:'wallet',
         title,detail:'Chain '+event.chainId+' · '+event.account+' · '+(event.blockNumber?'Block '+event.blockNumber:'Awaiting receipt'),
