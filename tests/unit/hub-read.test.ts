@@ -359,3 +359,17 @@ describe('wallet-scoped Activity HTTP boundary',()=>{
   expect((await fetch(base+'/api/activity?account='+account+'&cursor=bad!')).status).toBe(400)
  })
 })
+
+
+it('keeps wallet-scoped Activity public while gating the global feed when operator auth is configured',async()=>{
+ const {fleet}=fixture()
+ const secret='operator-token-1234567890-abcdefghijklmnopqrstuvwxyz'
+ const handle=createHubHandler(fleet,undefined,{operatorToken:secret})
+ const server=createServer(async(req,res)=>{await handle(req,res,new URL(req.url!,'http://localhost'))});servers.push(server)
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r))
+ const base='http://127.0.0.1:'+(server.address() as {port:number}).port
+ const account='0x1111111111111111111111111111111111111111'
+ expect((await fetch(base+'/api/activity')).status).toBe(403)
+ expect((await fetch(base+'/api/activity?account='+account)).status).toBe(200)
+ expect((await fetch(base+'/api/activity',{headers:{authorization:'Bearer '+secret}})).status).toBe(200)
+})
