@@ -338,6 +338,8 @@ export class Agent {
       const receipt=await this.market.client.public.waitForTransactionReceipt({ hash })
       if(receipt.status!=='success'){
         this.lastError='Live swap reverted: '+hash
+        this.pendingLive=undefined
+        this.persistState()
         return null
       }
       return { hash, amountOutMinimum: tx.amountOutMinimum }
