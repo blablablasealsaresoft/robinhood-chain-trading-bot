@@ -26,15 +26,9 @@ export async function getRecentLaunchesReliable(
 
   for (let start = fromBlock; start <= latest; start += chunk) {
     const end = start + chunk - 1n > latest ? latest : start + chunk - 1n
-    let noxaLogs:any[]=[]
-    try{
-      noxaLogs=await client.public.getLogs({
-        address:NOXA_ADDRESSES.launchFactory,
-        event:noxaTokenLaunchedEvent,
-        fromBlock:start,
-        toBlock:end,
-      })
-    }catch(error){options.onError?.(sourceError('noxa',error))}
+    const noxaLogs=await adaptiveLogs(
+      client,NOXA_ADDRESSES.launchFactory,noxaTokenLaunchedEvent,start,end,'noxa',options.onError,
+    )
     for (const log of noxaLogs) {
       launches.push({
         launchpad: 'noxa',
@@ -47,15 +41,9 @@ export async function getRecentLaunchesReliable(
     }
 
     for (const [index,address] of ODYSSEY_FACTORIES.entries()) {
-      let logs:any[]=[]
-      try{
-        logs=await client.public.getLogs({
-          address,
-          event:odysseyTokenCreatedEvent,
-          fromBlock:start,
-          toBlock:end,
-        })
-      }catch(error){options.onError?.(sourceError('odyssey-'+index,error))}
+      const logs=await adaptiveLogs(
+        client,address,odysseyTokenCreatedEvent,start,end,'odyssey-'+index,options.onError,
+      )
       for (const log of logs) {
         launches.push({
           launchpad: 'odyssey',
@@ -124,4 +112,38 @@ export function watchLaunchesReliable(
 function sourceError(source:string,error:unknown):Error {
   const message=error instanceof Error?error.message:String(error)
   return new Error('launch source '+source+' failed: '+message)
+}
+
+
+async function adaptiveLogs(
+  client:HoodClient,
+  address:Address,
+  event:unknown,
+  fromBlock:bigint,
+  toBlock:bigint,
+  source:string,
+  onError?: (error:Error)=>void,
+):Promise<any[]> {
+  try{
+    return await client.public.getLogs({
+      address,
+      event:event as any,
+      fromBlock,
+      toBlock,
+    } as any)
+  }catch(error){
+    const span=toBlock-fromBlock+1n
+    // Robinhood RPC providers differ in eth_getLogs range limits. Split safe,
+    // read-only history requests before declaring the source unavailable.
+    if(span>250n){
+      const mid=fromBlock+(span/2n)-1n
+      const [left,right]=await Promise.all([
+        adaptiveLogs(client,address,event,fromBlock,mid,source,onError),
+        adaptiveLogs(client,address,event,mid+1n,toBlock,source,onError),
+      ])
+      return [...left,...right]
+    }
+    onError?.(sourceError(source,error))
+    return []
+  }
 }
