@@ -22,13 +22,14 @@ Each bounded session writes:
 
 - `shadow-events.jsonl` — periodic snapshots with block, agent state, refusal reasons, Launch monitor events and arbitrage log tail;
 - `shadow-summary.json` — final strategy/monitor scorecard;
+- GitHub Actions step summary — compact per-run table of ticks, trades, refusals, simulated equity and monitor state;
 - `shadow-journal.sqlite` — closed SQLite Journal containing simulated trades, decisions and equity observations.
 
 No automatic parameter rewrite occurs. A strategy is marked `refinementReady` only after at least 20 simulated fills; even then the artifact says parameter changes require forward-outcome analysis.
 
 ## GitHub Actions
 
-`.github/workflows/shadow-mainnet.yml` runs a short five-minute shadow session for changes to the shadow/strategy/framework paths and supports manually dispatched sessions up to 180 minutes.
+`.github/workflows/shadow-mainnet.yml` runs a short five-minute shadow session for changes to the shadow/strategy/framework paths, supports manually dispatched sessions up to 180 minutes, and on the integrated/default branch schedules a 55-minute mainnet session every four hours (six sessions per day). Scheduled workflows only execute from the repository default branch, so opening this PR does not create duplicate long-running schedules before integration.
 
 The workflow never accepts a private key. It sets:
 
@@ -64,4 +65,4 @@ Use multiple sessions and compare out-of-sample outcomes before changing thresho
 - Stock Token spread frequency/magnitude for Premium Watch;
 - arbitrage dry-run opportunity frequency and errors.
 
-Any parameter/code change should be an isolated reviewable PR. Shadow telemetry itself must never merge or deploy strategy changes.
+Artifacts are retained for 90 days to support cross-session review. Any parameter/code change should be an isolated reviewable PR. Shadow telemetry itself must never merge or deploy strategy changes.
