@@ -1,0 +1,96 @@
+name: Mainnet shadow fleet
+
+on:
+  pull_request:
+    paths:
+      - 'src/shadow-main.ts'
+      - 'src/strategies/**'
+      - 'src/framework/**'
+      - '.github/workflows/shadow-mainnet.yml'
+      - 'package.json'
+      - 'tsup.config.ts'
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: Shadow session length (1-180 minutes)
+        required: false
+        default: '55'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shadow-mainnet-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    env:
+      HOOD_NETWORK: mainnet
+      HOOD_TRADERS_LIVE: '0'
+      ROBINHOOD_CHAIN_PRIVATE_KEY: ''
+      HOOD_RPC_URL: ${{ secrets.HOOD_SHADOW_RPC_URL }}
+      HOOD_STOCK_TOKEN_ELIGIBLE: 'false'
+      HUB_LAUNCH_FACTORY: '0xf1981c4b82961a85fdd86c08f3cccb7e2dfc9f43'
+      HUB_LAUNCH_FACTORY_BLOCK: '66613147'
+      SHADOW_OUTPUT_DIR: ./data/shadow
+      SHADOW_SNAPSHOT_SECONDS: '60'
+      SHADOW_DURATION_MINUTES: ${{ github.event_name == 'pull_request' && '5' || inputs.duration_minutes || '55' }}
+      HUB_ARB_REPO: ${{ github.workspace }}/RobinHood-Arbitrage-Bot
+    steps:
+      - name: Checkout Trading Hub backend
+        uses: actions/checkout@v4
+
+      - name: Checkout arbitrage monitor
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: blablablasealsaresoft/RobinHood-Arbitrage-Bot
+          path: RobinHood-Arbitrage-Bot
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+          cache: npm
+
+      - name: Install backend
+        run: npm ci
+
+      - name: Install arbitrage monitor
+        continue-on-error: true
+        working-directory: RobinHood-Arbitrage-Bot
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify no live signer
+        shell: bash
+        run: |
+          test "${HOOD_TRADERS_LIVE}" = "0"
+          test -z "${ROBINHOOD_CHAIN_PRIVATE_KEY}"
+
+      - name: Run mainnet shadow session
+        run: npm run shadow:mainnet
+
+      - name: Print shadow summary
+        if: always()
+        run: |
+          if [ -f data/shadow/shadow-summary.json ]; then
+            cat data/shadow/shadow-summary.json
+          fi
+
+      - name: Upload shadow telemetry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mainnet-shadow-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            data/shadow/shadow-summary.json
+            data/shadow/shadow-events.jsonl
+            data/shadow/shadow-journal.sqlite
+          if-no-files-found: warn
+          retention-days: 30
