@@ -2,7 +2,7 @@ name: Mainnet shadow fleet
 
 on:
   schedule:
-    # Four bounded 55-minute sessions per 16h? Actually every four hours = six/day.
+    # Six bounded 55-minute sessions per day, every four hours.
     # Offset from the hour to avoid common CI/API traffic spikes.
     - cron: '17 */4 * * *'
   pull_request:
