@@ -183,7 +183,7 @@ describe('HTTP adapter', () => {
 
 
 describe('manual Stock Token trading boundary',()=>{
- function stockFixture(eligible:boolean){
+ function stockFixture(eligible:boolean,attested=eligible){
   const market=new Market({...config,stockTokenEligible:eligible})
   const canonical=market.pricedStockTokens()[0]!
   const now=Date.now()
@@ -194,7 +194,7 @@ describe('manual Stock Token trading boundary',()=>{
     :{quotes:[{tokenSymbol:canonical.symbol,deployments:[{chainId:4663,contractAddress:canonical.address}],isTradingHalt:false,generatedAt:new Date(now).toISOString()}]}
    return new Response(JSON.stringify(body),{headers:{'content-type':'application/json'}})
   }) as unknown as typeof fetch
-  const stockCompliance=new StockCompliancePolicy(eligible?attestation:undefined,fakeFetch,()=>now)
+  const stockCompliance=new StockCompliancePolicy(attested?attestation:undefined,fakeFetch,()=>now)
   vi.spyOn(market.client.public,'getChainId').mockResolvedValue(4663)
   vi.spyOn(market.client.public,'getGasPrice').mockResolvedValue(1_000_000_000n)
   vi.spyOn(market.client.public,'estimateGas').mockResolvedValue(150000n)
@@ -216,6 +216,12 @@ describe('manual Stock Token trading boundary',()=>{
   const sell=await f.service.quote({chainId:'4663',tokenIn:f.stock.address,tokenOut:f.market.usdg,amountIn:(10n**18n).toString(),account,slippageBps:'50'})
   expect(sell.tokenIn.type).toBe('stock-token')
   expect(sell.stockSafety).toMatchObject({symbol:f.stock.symbol,referencePriceUsd:100,executionPriceUsd:100,deviationBps:0,acquisitionEligibilityRequired:false})
+ })
+
+ it('requires wallet-scoped compliance even when the deployment eligibility flag is enabled',async()=>{
+  const f=stockFixture(true,false)
+  await expect(f.service.quote({chainId:'4663',tokenIn:f.market.usdg,tokenOut:f.stock.address,amountIn:'100000000',account,slippageBps:'50'})).rejects.toMatchObject({code:'STOCK_COMPLIANCE_REQUIRED'})
+  expect(f.market.stockChainlinkPrice).not.toHaveBeenCalled()
  })
 
  it('quotes eligible USDG acquisition only when DEX execution stays near the fresh reference',async()=>{
