@@ -2,6 +2,7 @@ import { erc20Abi, formatUnits, getAddress, isAddress, type Address } from 'viem
 import type { Fleet } from '../framework/fleet.js'
 import type { Market } from '../framework/market.js'
 import type { AssetRegistry } from './assets.js'
+import type { StockCompliancePolicy } from './stock-compliance.js'
 import { HubError } from './manual-swaps.js'
 
 /** Read adapter: valuation never grants permission to acquire a security. */
@@ -11,7 +12,7 @@ export class HubReadModel {
   private tokenPriceCache = new Map<string,{at:number;value:{price:number;source:string}|null}>()
   private tokenPricePending = new Map<string,Promise<{price:number;source:string}|null>>()
   private probeCursor=0
-  constructor(private fleet: Fleet, private market: Market, private registry: AssetRegistry) {}
+  constructor(private fleet: Fleet, private market: Market, private registry: AssetRegistry, private stockCompliance?:StockCompliancePolicy) {}
   async checkChain() {
     if (await this.market.client.public.getChainId() !== this.registry.chainId) throw new HubError(503, 'CHAIN_MISMATCH', 'The RPC returned a different network.')
   }
@@ -115,7 +116,7 @@ export class HubReadModel {
     }
   }
 
-  async stock(symbol: string) {
+  async stock(symbol: string, rawAccount:string|null=null) {
     const token = this.registry.list().find(a => a.type === 'stock-token' && a.symbol === symbol.toUpperCase())
     if (!token) throw new HubError(404, 'UNKNOWN_STOCK', 'This Stock Token is not in the network registry.')
     const cached = this.stocksCache.get(token.symbol)
@@ -127,12 +128,14 @@ export class HubReadModel {
       const reference = await this.market.stockChainlinkPrice(token.symbol)
       // Reuse Market and preserve its existing eligibility gate on acquisition quotes.
       const dex = reference ? await this.market.stockDexPrice(token.address, reference.priceUsd) : null
+      const compliance=rawAccount&&this.stockCompliance?this.stockCompliance.publicStatus(rawAccount):{configured:!!this.stockCompliance?.configured,eligible:false,expiresAt:null,checks:null}
       const value = { asset: token, referencePriceUsd: reference?.priceUsd ?? null, referenceUpdatedAt: reference ? reference.updatedAt * 1000 : null,
         dexPriceUsd: dex, premiumBps: reference && dex !== null ? (dex/reference.priceUsd-1)*10000 : null,
         liquidityUsd: null,
         tradingEnabled: this.registry.chainId===4663 && dex!==null,
-        acquisitionEnabled: this.registry.chainId===4663 && dex!==null && this.market.client.acknowledgeStockTokenEligibility,
+        acquisitionEnabled: this.registry.chainId===4663 && dex!==null && this.market.client.acknowledgeStockTokenEligibility && compliance.eligible,
         eligibilityAcknowledged: !!this.market.client.acknowledgeStockTokenEligibility,
+        walletCompliance:compliance,
         dexStatus: dex === null ? 'unavailable' : 'quoted',
         observedAt: Date.now(), probeUsdg: '10' }
       this.stocksCache.set(token.symbol, { at: Date.now(), value })
