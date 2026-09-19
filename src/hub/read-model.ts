@@ -119,9 +119,10 @@ export class HubReadModel {
   async stock(symbol: string, rawAccount:string|null=null) {
     const token = this.registry.list().find(a => a.type === 'stock-token' && a.symbol === symbol.toUpperCase())
     if (!token) throw new HubError(404, 'UNKNOWN_STOCK', 'This Stock Token is not in the network registry.')
-    const cached = this.stocksCache.get(token.symbol)
+    const stockCacheKey=token.symbol+':'+(rawAccount?.toLowerCase()||'public')
+    const cached = this.stocksCache.get(stockCacheKey)
     if (cached && Date.now()-cached.at < 30_000) return cached.value
-    const pending = this.stocksPending.get(token.symbol)
+    const pending = this.stocksPending.get(stockCacheKey)
     if (pending) return pending
     const request = (async () => {
       await this.checkChain()
@@ -138,10 +139,10 @@ export class HubReadModel {
         walletCompliance:compliance,
         dexStatus: dex === null ? 'unavailable' : 'quoted',
         observedAt: Date.now(), probeUsdg: '10' }
-      this.stocksCache.set(token.symbol, { at: Date.now(), value })
+      this.stocksCache.set(stockCacheKey, { at: Date.now(), value })
       return value
-    })().finally(() => this.stocksPending.delete(token.symbol))
-    this.stocksPending.set(token.symbol, request)
+    })().finally(() => this.stocksPending.delete(stockCacheKey))
+    this.stocksPending.set(stockCacheKey, request)
     return request
   }
   private async tokenSpotPrice(asset:{address:Address;decimals:number}):Promise<{price:number;source:string}|null> {
