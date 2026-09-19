@@ -1,6 +1,10 @@
 name: Mainnet shadow fleet
 
 on:
+  schedule:
+    # Four bounded 55-minute sessions per 16h? Actually every four hours = six/day.
+    # Offset from the hour to avoid common CI/API traffic spikes.
+    - cron: '17 */4 * * *'
   pull_request:
     paths:
       - 'src/shadow-main.ts'
@@ -37,7 +41,7 @@ jobs:
       HUB_LAUNCH_FACTORY_BLOCK: '66613147'
       SHADOW_OUTPUT_DIR: ./data/shadow
       SHADOW_SNAPSHOT_SECONDS: '60'
-      SHADOW_DURATION_MINUTES: ${{ github.event_name == 'pull_request' && '5' || inputs.duration_minutes || '55' }}
+      SHADOW_DURATION_MINUTES: ${{ github.event_name == 'pull_request' && '5' || github.event_name == 'schedule' && '55' || inputs.duration_minutes || '55' }}
       HUB_ARB_REPO: ${{ github.workspace }}/RobinHood-Arbitrage-Bot
     steps:
       - name: Checkout Trading Hub backend
@@ -76,11 +80,11 @@ jobs:
       - name: Run mainnet shadow session
         run: npm run shadow:mainnet
 
-      - name: Print shadow summary
+      - name: Publish shadow scorecard
         if: always()
         run: |
           if [ -f data/shadow/shadow-summary.json ]; then
-            cat data/shadow/shadow-summary.json
+            node scripts/shadow-report.mjs data/shadow/shadow-summary.json
           fi
 
       - name: Upload shadow telemetry
@@ -93,4 +97,4 @@ jobs:
             data/shadow/shadow-events.jsonl
             data/shadow/shadow-journal.sqlite
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90
