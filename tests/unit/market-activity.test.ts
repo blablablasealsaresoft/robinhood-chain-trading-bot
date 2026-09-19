@@ -27,7 +27,7 @@ function fixture(){
  const row={id:'asset',chainId:4663,address:asset,symbol:'TEST',name:'Test',decimals:18,type:'crypto',source:'test',tradable:true}
  const registry={chainId:4663,get:(address:string)=>address.toLowerCase()===asset.toLowerCase()?row:undefined,list:()=>[row]} as unknown as AssetRegistry
  const service=new MarketActivityService(market,registry,journal,()=>now)
- return {journal,service,getLogs,publicClient}
+ return {journal,service,getLogs,publicClient,market}
 }
 
 describe('MarketActivityService',()=>{
@@ -58,7 +58,7 @@ describe('MarketActivityService',()=>{
   await expect(f.service.read({asset,hours:1,intervalSeconds:120})).rejects.toMatchObject({code:'INVALID_INTERVAL'})
   await expect(f.service.read({asset:'0x4444444444444444444444444444444444444444'})).rejects.toMatchObject({code:'UNKNOWN_ASSET'})
   const usdgRegistry={chainId:4663,get:()=>({id:'usdg',chainId:4663,address:usdg,symbol:'USDG',name:'USDG',decimals:6,type:'stablecoin',source:'test',tradable:true}),list:()=>[]} as unknown as AssetRegistry
-  const service=new MarketActivityService({client:f.service['market'].client,usdg,usdgDecimals:6} as unknown as Market,usdgRegistry,f.journal,()=>now)
+  const service=new MarketActivityService(f.market,usdgRegistry,f.journal,()=>now)
   await expect(service.read({asset:usdg})).rejects.toMatchObject({code:'QUOTE_ASSET'})
   f.journal.close()
  })
