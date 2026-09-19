@@ -127,3 +127,18 @@ export function loadHubBindHost(env:NodeJS.ProcessEnv=process.env):string {
   if(!/^[A-Za-z0-9.:[\]-]+$/.test(value))throw new Error('HUB_BIND_HOST contains unsupported characters')
   return value
 }
+
+
+export interface LiveAutomationConfig {
+  enabled:boolean
+  agents:string[]
+}
+export function loadLiveAutomationConfig(env:NodeJS.ProcessEnv=process.env):LiveAutomationConfig {
+  const enabled=env.HUB_LIVE_AUTOMATION==='I_UNDERSTAND_REAL_FUNDS'
+  const agents=(env.HUB_LIVE_AUTOMATION_AGENTS||'').split(',').map(x=>x.trim()).filter(Boolean)
+  if(!enabled)return {enabled:false,agents:[]}
+  if(!agents.length)throw new Error('HUB_LIVE_AUTOMATION_AGENTS must explicitly list at least one approved strategy')
+  const allowed=new Set(['sniper-1','momentum-1','premium-1'])
+  if(agents.some(id=>!allowed.has(id))||new Set(agents).size!==agents.length)throw new Error('HUB_LIVE_AUTOMATION_AGENTS contains an unsupported or duplicate strategy')
+  return {enabled:true,agents}
+}
