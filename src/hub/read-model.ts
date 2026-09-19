@@ -67,6 +67,54 @@ export class HubReadModel {
     }
     return [...merged.values()].sort((a,b)=>b.at-a.at).slice(0,100)
   }
+
+  activityPage(rawAccount:string|null,rawLimit=50,rawCursor:string|null=null) {
+    if(!rawAccount||!isAddress(rawAccount)||/^0x0{40}$/i.test(rawAccount))throw new HubError(400,'INVALID_ACCOUNT','Enter a valid public wallet address.')
+    const account=getAddress(rawAccount)
+    if(!Number.isInteger(rawLimit)||rawLimit<1||rawLimit>100)throw new HubError(400,'INVALID_LIMIT','Activity limit must be between 1 and 100.')
+    const cursor=decodeActivityCursor(rawCursor)
+    const take=Math.min(101,rawLimit+1)
+    const candidates:Array<{event:any;at:number;pageKey:string}>=[]
+    for(const row of this.fleet.journal.walletActivityPage(account,take,cursor)){
+      const event=row.value
+      const title=event.kind.startsWith('launch-')?({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[event.kind]:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':'WETH unwrapped to ETH'
+      candidates.push({at:row.at,pageKey:row.pageKey,event:{
+        id:'wallet:'+event.chainId+':'+event.txHash,at:event.at,type:event.kind,source:'user-wallet',mode:'wallet',
+        title,detail:'Chain '+event.chainId+' · '+event.account+' · '+(event.blockNumber?'Block '+event.blockNumber:'Awaiting receipt'),
+        status:event.status,txHash:event.txHash,chainId:event.chainId,owner:event.account,verifiedAt:event.observedAt,
+      }})
+    }
+    for(const row of this.fleet.journal.externalEventsPage(account,take,cursor)){
+      const event=row.value
+      candidates.push({at:row.at,pageKey:row.pageKey,event:{
+        id:event.id,at:event.at,type:event.type,source:event.source,mode:event.type==='launch'?'discovery':'wallet',
+        title:event.title,detail:event.detail,status:event.status,txHash:event.txHash,
+        chainId:event.type==='bridge'?(event.data.reference as {fromChainId?:number}|undefined)?.fromChainId??event.chainId:event.chainId,
+        owner:event.owner,verifiedAt:event.verification==='unverified'?undefined:event.observedAt,observedAt:event.observedAt,verification:event.verification,
+        link:event.type==='bridge'?'https://scan.li.fi/tx/'+encodeURIComponent(event.txHash):'https://robinhoodchain.blockscout.com/tx/'+event.txHash,
+        receivingHash:event.type==='bridge'?event.data.receivingHash:null,
+      }})
+    }
+    for(const row of this.fleet.journal.manualDecisionPage(account,take,cursor)){
+      const decision=row.value
+      candidates.push({at:row.at,pageKey:row.pageKey,event:{
+        id:'decision:'+decision.id,at:decision.ts,type:decision.kind,source:decision.agentId,mode:'manual',
+        title:'Wallet transaction prepared',
+        detail:/error|https?:\/\//i.test(decision.detail)?'See the local journal for diagnostic details.':decision.detail,
+        status:'unsigned',txHash:null,owner:account,
+      }})
+    }
+    candidates.sort((a,b)=>b.at-a.at||b.pageKey.localeCompare(a.pageKey))
+    const page=candidates.slice(0,rawLimit)
+    const hasMore=candidates.length>rawLimit
+    const last=page.at(-1)
+    return {
+      account,scope:'wallet',limit:rawLimit,
+      events:page.map(row=>row.event),
+      nextCursor:hasMore&&last?encodeActivityCursor({at:last.at,key:last.pageKey}):null,
+    }
+  }
+
   async stock(symbol: string) {
     const token = this.registry.list().find(a => a.type === 'stock-token' && a.symbol === symbol.toUpperCase())
     if (!token) throw new HubError(404, 'UNKNOWN_STOCK', 'This Stock Token is not in the network registry.')
@@ -181,4 +229,17 @@ export class HubReadModel {
       walletPnlUsd: null, positions: this.positions(), botSummary: this.fleet.summary(),
       coverage: 'Native ETH and the Hub asset registry only. Held non-stock ERC-20s use bounded live DEX probes when available. Bot positions are separate and are not added to wallet value.' }
   }
+}
+
+function encodeActivityCursor(cursor:{at:number;key:string}):string {
+  return Buffer.from(JSON.stringify(cursor),'utf8').toString('base64url')
+}
+function decodeActivityCursor(raw:string|null):{at:number;key:string}|undefined {
+  if(raw===null||raw==='')return undefined
+  if(raw.length>512||!/^[A-Za-z0-9_-]+$/.test(raw))throw new HubError(400,'INVALID_CURSOR','Activity cursor is invalid.')
+  try{
+    const value=JSON.parse(Buffer.from(raw,'base64url').toString('utf8')) as {at?:unknown;key?:unknown}
+    if(!Number.isSafeInteger(value.at)||Number(value.at)<0||typeof value.key!=='string'||value.key.length<1||value.key.length>256)throw new Error()
+    return {at:Number(value.at),key:value.key}
+  }catch{throw new HubError(400,'INVALID_CURSOR','Activity cursor is invalid.')}
 }

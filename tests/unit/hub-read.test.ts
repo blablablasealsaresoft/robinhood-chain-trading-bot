@@ -272,3 +272,104 @@ it('returns structured health when the Journal or observation table fails',async
  // Prevent fixture teardown from double-closing the intentionally closed DB.
  vi.spyOn(fleet.journal,'close').mockImplementation(()=>{})
 })
+
+
+describe('wallet-scoped Activity pagination',()=>{
+ const a='0x1111111111111111111111111111111111111111'
+ const b='0x2222222222222222222222222222222222222222'
+ const hash=(n:string)=>('0x'+n.repeat(64)) as `0x${string}`
+
+ it('isolates wallet-owned records from other wallets and global bot decisions',()=>{
+  const {fleet,read}=fixture()
+  fleet.journal.recordWalletActivity({planId:'a-plan',chainId:4663,account:a,txHash:hash('a'),kind:'swap',status:'confirmed',at:3000,observedAt:3100,blockNumber:'10',blockHash:hash('b')})
+  fleet.journal.recordWalletActivity({planId:'b-plan',chainId:4663,account:b,txHash:hash('c'),kind:'wrap',status:'confirmed',at:2900,observedAt:3000,blockNumber:'9',blockHash:hash('d')})
+  fleet.journal.recordExternalEvent({id:'bridge-a',type:'bridge',source:'lifi',chainId:1,txHash:hash('e'),owner:a,at:2800,observedAt:2850,status:'completed',verification:'provider',title:'Bridge A',detail:'A only',data:{reference:{fromChainId:1}}})
+  fleet.journal.recordExternalEvent({id:'bridge-b',type:'bridge',source:'lifi',chainId:1,txHash:hash('f'),owner:b,at:2700,observedAt:2750,status:'completed',verification:'provider',title:'Bridge B',detail:'B only',data:{reference:{fromChainId:1}}})
+  fleet.journal.recordDecision({agentId:'hub:manual',ts:2600,kind:'observe',detail:'A prepared',meta:{owner:a}})
+  fleet.journal.recordDecision({agentId:'bot-1',ts:2500,kind:'alert',detail:'global bot',meta:{}})
+  const page=read.activityPage(a,20)
+  expect(page).toMatchObject({account:getAddress(a),scope:'wallet',nextCursor:null})
+  expect(page.events.map((e:any)=>e.title)).toContain('Wallet swap')
+  expect(page.events.map((e:any)=>e.title)).toContain('Bridge A')
+  expect(page.events.map((e:any)=>e.title)).toContain('Wallet transaction prepared')
+  expect(JSON.stringify(page.events)).not.toContain('Bridge B')
+  expect(JSON.stringify(page.events)).not.toContain('global bot')
+  expect(JSON.stringify(page.events)).not.toContain(b)
+ })
+
+ it('uses the wallet receipt as the canonical user record when a launch factory event shares its hash',()=>{
+  const {fleet,read}=fixture(),tx=hash('a')
+  fleet.journal.recordWalletActivity({planId:'launch',chainId:4663,account:a,txHash:tx,kind:'launch-create',status:'confirmed',at:3000,observedAt:3100,blockNumber:'10',blockHash:hash('b')})
+  fleet.journal.recordExternalEvent({id:'launch:4663:'+tx+':1',type:'launch',source:'hub-launchpad',chainId:4663,txHash:tx,owner:a,at:3000,observedAt:3200,status:'confirmed',verification:'chain-event',title:'NEW launched',detail:'factory event',data:{}})
+  const events=read.activityPage(a,20).events.filter((e:any)=>e.txHash===tx)
+  expect(events).toHaveLength(1)
+  expect(events[0]).toMatchObject({source:'user-wallet',title:'Token and sale created'})
+ })
+
+ it('paginates deterministically without duplicates or gaps at identical timestamps',()=>{
+  const {fleet,read}=fixture()
+  for(const [i,n] of ['a','b','c','d','e'].entries())fleet.journal.recordWalletActivity({
+    planId:'p'+i,chainId:4663,account:a,txHash:hash(n),kind:'swap',status:'confirmed',at:5000,observedAt:5100+i,blockNumber:String(10+i),blockHash:hash('f'),
+  })
+  const first=read.activityPage(a,2)
+  expect(first.events).toHaveLength(2);expect(first.nextCursor).toBeTruthy()
+  const second=read.activityPage(a,2,first.nextCursor)
+  expect(second.events).toHaveLength(2);expect(second.nextCursor).toBeTruthy()
+  const third=read.activityPage(a,2,second.nextCursor)
+  expect(third.events).toHaveLength(1);expect(third.nextCursor).toBeNull()
+  const ids=[...first.events,...second.events,...third.events].map((e:any)=>e.id)
+  expect(new Set(ids).size).toBe(5)
+ })
+
+ it('rejects malformed cursor and bounds',()=>{
+  const {read}=fixture()
+  expect(()=>read.activityPage(a,0)).toThrow()
+  expect(()=>read.activityPage(a,101)).toThrow()
+  expect(()=>read.activityPage(a,10,'not!base64')).toThrow()
+ })
+})
+
+
+describe('wallet-scoped Activity HTTP boundary',()=>{
+ it('returns wallet scope with pagination metadata and keeps legacy global feed separate',async()=>{
+  const {fleet}=fixture()
+  const account='0x1111111111111111111111111111111111111111'
+  fleet.journal.recordWalletActivity({planId:'p1',chainId:4663,account,txHash:('0x'+'a'.repeat(64)) as `0x${string}`,kind:'swap',status:'confirmed',at:1000,observedAt:1100,blockNumber:'1',blockHash:('0x'+'b'.repeat(64)) as `0x${string}`})
+  fleet.journal.recordDecision({agentId:'bot-1',ts:900,kind:'alert',detail:'operator event',meta:{}})
+  const handle=createHubHandler(fleet)
+  const server=createServer(async(req,res)=>{await handle(req,res,new URL(req.url!,'http://localhost'))});servers.push(server)
+  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r))
+  const base='http://127.0.0.1:'+(server.address() as {port:number}).port
+  const scoped=await fetch(base+'/api/activity?account='+account+'&limit=10')
+  expect(scoped.status).toBe(200)
+  expect(await scoped.json()).toMatchObject({account:getAddress(account),scope:'wallet',limit:10,nextCursor:null,events:[{source:'user-wallet'}]})
+  const global=await fetch(base+'/api/activity')
+  expect(await global.json()).toMatchObject({scope:'operator-global',nextCursor:null})
+ })
+
+ it('rejects duplicate, unsupported and malformed pagination parameters',async()=>{
+  const {fleet}=fixture()
+  const handle=createHubHandler(fleet)
+  const server=createServer(async(req,res)=>{await handle(req,res,new URL(req.url!,'http://localhost'))});servers.push(server)
+  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r))
+  const base='http://127.0.0.1:'+(server.address() as {port:number}).port
+  const account='0x1111111111111111111111111111111111111111'
+  expect((await fetch(base+'/api/activity?account='+account+'&limit=2&limit=3')).status).toBe(400)
+  expect((await fetch(base+'/api/activity?account='+account+'&extra=1')).status).toBe(400)
+  expect((await fetch(base+'/api/activity?account='+account+'&cursor=bad!')).status).toBe(400)
+ })
+})
+
+
+it('keeps wallet-scoped Activity public while gating the global feed when operator auth is configured',async()=>{
+ const {fleet}=fixture()
+ const secret='operator-token-1234567890-abcdefghijklmnopqrstuvwxyz'
+ const handle=createHubHandler(fleet,undefined,{operatorToken:secret})
+ const server=createServer(async(req,res)=>{await handle(req,res,new URL(req.url!,'http://localhost'))});servers.push(server)
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r))
+ const base='http://127.0.0.1:'+(server.address() as {port:number}).port
+ const account='0x1111111111111111111111111111111111111111'
+ expect((await fetch(base+'/api/activity')).status).toBe(403)
+ expect((await fetch(base+'/api/activity?account='+account)).status).toBe(200)
+ expect((await fetch(base+'/api/activity',{headers:{authorization:'Bearer '+secret}})).status).toBe(200)
+})
