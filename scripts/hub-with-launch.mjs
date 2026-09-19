@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
-import {createPublicClient,defineChain,keccak256} from 'viem';
+import {createPublicClient,keccak256} from 'viem';
+import {robinhood} from 'viem/chains';
+import {getSharedReliableRpc,rpcOptionsFromEnv} from '../dist/rpc.js';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const launchRoot=path.resolve(process.env.HUB_LAUNCHPAD_PATH||path.join(root,'../robinhood-launchpad'));
 const manifest=JSON.parse(fs.readFileSync(path.join(launchRoot,'deployments/4663.json'),'utf8'));
@@ -11,10 +13,9 @@ if(manifest.deployer.toLowerCase()!=='0xb50516982524dff3d8d563f46ad54891aa61944e
 const artifacts=Object.fromEntries(['LaunchFactory','TokenFactory'].map(name=>[name,JSON.parse(fs.readFileSync(path.join(launchRoot,'artifacts',name+'.json'),'utf8'))]));
 if(keccak256(artifacts.LaunchFactory.bytecode)!==reviewed)throw new Error('Launchpad artifacts changed.');
 const {verifyFactory}=await import(pathToFileURL(path.join(launchRoot,'scripts/live-operations.mjs')).href);
-const {pacedReadTransport}=await import(pathToFileURL(path.join(launchRoot,'scripts/paced-rpc.mjs')).href);
-const rpc=process.env.HOOD_RPC_URL||'https://rpc.mainnet.chain.robinhood.com';
-const chain=defineChain({id:4663,name:'Robinhood Chain',nativeCurrency:{name:'Ether',symbol:'ETH',decimals:18},rpcUrls:{default:{http:[rpc]}}});
-const client=createPublicClient({chain,transport:pacedReadTransport(rpc),cacheTime:0});
+if(process.env.HOOD_NETWORK&&process.env.HOOD_NETWORK!=='mainnet')throw new Error('Use mainnet for this verified deployment.');
+const rpc=getSharedReliableRpc(rpcOptionsFromEnv({...process.env,HOOD_NETWORK:'mainnet'}));
+const client=createPublicClient({chain:robinhood,transport:rpc.transport,cacheTime:0});
 if(await client.getChainId()!==4663)throw new Error('RPC chain mismatch.');
 const receipt=await client.waitForTransactionReceipt({hash:manifest.transactionHash,confirmations:2,timeout:60000});
 const tx=await client.getTransaction({hash:manifest.transactionHash});

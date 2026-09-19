@@ -1,3 +1,4 @@
+import { rpcOptionsFromEnv } from './rpc.js'
 import type { HoodNetwork } from 'hoodchain'
 import type { Mode, RiskLimits } from './types.js'
 import type { LlmClientConfig, LlmProvider } from './llm.js'
@@ -52,6 +53,7 @@ function bool(name: string, fallback: boolean): boolean {
  * silently spend real funds.
  */
 export function loadFleetConfig(env: NodeJS.ProcessEnv = process.env): FleetConfig {
+  const rpc = rpcOptionsFromEnv(env)
   const network = (env.HOOD_NETWORK === 'testnet' ? 'testnet' : 'mainnet') as HoodNetwork
   const wantLive = bool('HOOD_TRADERS_LIVE', false)
   const privateKey = env.ROBINHOOD_CHAIN_PRIVATE_KEY as `0x${string}` | undefined
@@ -60,11 +62,11 @@ export function loadFleetConfig(env: NodeJS.ProcessEnv = process.env): FleetConf
 
   return {
     network,
-    rpcUrl: env.HOOD_RPC_URL || undefined,
-    rpcFallbackUrls: (env.HOOD_RPC_FALLBACK_URLS || '').split(',').map(x=>x.trim()).filter(Boolean),
-    rpcMaxConcurrency: num('HOOD_RPC_MAX_CONCURRENCY',8),
-    rpcReadRetries: num('HOOD_RPC_READ_RETRIES',1),
-    rpcTimeoutMs: num('HOOD_RPC_TIMEOUT_MS',8000),
+    rpcUrl: rpc.primaryUrl,
+    rpcFallbackUrls: rpc.fallbackUrls,
+    rpcMaxConcurrency: rpc.maxConcurrency,
+    rpcReadRetries: rpc.readRetries,
+    rpcTimeoutMs: rpc.timeoutMs,
     mode,
     hasWallet: hasKey,
     privateKey: hasKey ? privateKey : undefined,
@@ -86,7 +88,7 @@ const LLM_PROVIDERS: readonly LlmProvider[] = ['anthropic', 'openai', 'groq', 'o
 
 /**
  * Resolve LLM config for {@link LlmStrategist} from the environment. Returns
- * `null` when `HOOD_LLM_PROVIDER` or `HOOD_LLM_API_KEY` is unset — the
+ * `null` when `HOOD_LLM_PROVIDER` or `HOOD_LLM_API_KEY` is unset â€” the
  * strategy is optional and simply isn't added to the fleet in that case (see
  * main.ts). Throws only when `HOOD_LLM_PROVIDER` is set to an unrecognized
  * value, since that is very likely a typo the operator would want to know

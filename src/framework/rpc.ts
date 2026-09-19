@@ -22,8 +22,29 @@ export interface ReliableRpcOptions {
   fetchFn?: typeof fetch
 }
 
+
+function integerOption(value:number|undefined,fallback:number,min:number,max:number):number {
+  const result=value??fallback
+  if(!Number.isInteger(result)||result<min||result>max)throw new Error('RPC numeric configuration is outside its supported integer range')
+  return result
+}
+
+/** Shared by Market configuration and the verified launch startup path. */
+export function rpcOptionsFromEnv(env:NodeJS.ProcessEnv=process.env):ReliableRpcOptions {
+  const number=(name:string,fallback:number,min:number,max:number)=>
+    integerOption(env[name]===undefined||env[name]===''?undefined:Number(env[name]),fallback,min,max)
+  return {
+    network:env.HOOD_NETWORK==='testnet'?'testnet':'mainnet',
+    primaryUrl:env.HOOD_RPC_URL||undefined,
+    fallbackUrls:(env.HOOD_RPC_FALLBACK_URLS||'').split(',').map(url=>url.trim()).filter(Boolean),
+    maxConcurrency:number('HOOD_RPC_MAX_CONCURRENCY',8,1,32),
+    readRetries:number('HOOD_RPC_READ_RETRIES',1,0,3),
+    timeoutMs:number('HOOD_RPC_TIMEOUT_MS',8000,500,30000),
+  }
+}
+
 type RpcArgs={method:string;params?:readonly unknown[]}
-type Endpoint={url:string;validated:boolean;wrongChain:boolean;failures:number;latencyMs:number|null;lastError:string|null;cooldownUntil:number}
+type Endpoint={url:string;validated:boolean;validation?:Promise<void>;wrongChain:boolean;failures:number;latencyMs:number|null;lastError:string|null;cooldownUntil:number}
 type CacheEntry={expiresAt:number;value:unknown}
 
 class RpcTransportError extends Error {
@@ -51,13 +72,31 @@ class Semaphore {
   }
 }
 
-const UNSAFE=/^(eth_send|eth_sign|personal_|wallet_|debug_|engine_|miner_)/
+// Only explicitly idempotent reads may retry, coalesce or use another endpoint.
+const READ_METHODS=new Set([
+  'eth_chainId','eth_blockNumber','eth_call','eth_estimateGas','eth_createAccessList',
+  'eth_gasPrice','eth_maxPriorityFeePerGas','eth_feeHistory','eth_blobBaseFee',
+  'eth_getBalance','eth_getCode','eth_getStorageAt','eth_getProof','eth_getTransactionCount',
+  'eth_getBlockByHash','eth_getBlockByNumber','eth_getBlockTransactionCountByHash',
+  'eth_getBlockTransactionCountByNumber','eth_getTransactionByHash',
+  'eth_getTransactionByBlockHashAndIndex','eth_getTransactionByBlockNumberAndIndex',
+  'eth_getTransactionReceipt','eth_getBlockReceipts','eth_getLogs',
+  'eth_getUncleByBlockHashAndIndex','eth_getUncleByBlockNumberAndIndex',
+  'eth_getUncleCountByBlockHash','eth_getUncleCountByBlockNumber',
+  'eth_syncing','net_version','net_listening','web3_clientVersion',
+])
+const FILTER_METHODS=new Set([
+  'eth_newFilter','eth_newBlockFilter','eth_newPendingTransactionFilter',
+  'eth_getFilterChanges','eth_getFilterLogs','eth_uninstallFilter',
+])
 const RETRYABLE_MESSAGE=/rate.?limit|too many requests|timeout|temporar|busy|unavailable|overload/i
 
-function cacheTtl(method:string):number {
+function cacheTtl(args:RpcArgs):number {
+  const {method,params}=args
   if(method==='eth_chainId')return 300_000
   if(method==='eth_blockNumber')return 750
-  if(method==='eth_getCode')return 30_000
+  // Moving latest/pending code (including negative results) must not be cached.
+  if(method==='eth_getCode'&&typeof params?.[1]==='string'&&/^0x[0-9a-f]+$/i.test(params[1]))return 30_000
   return 0
 }
 function errorLabel(error:unknown):string {
@@ -89,6 +128,7 @@ export type ReliableRpc={
 const sharedRpc=new Map<string,ReliableRpc>()
 
 export function getSharedReliableRpc(options:ReliableRpcOptions):ReliableRpc {
+  if(options.fetchFn)return createReliableRpc(options)
   const key=JSON.stringify({
     network:options.network,
     primaryUrl:options.primaryUrl??null,
@@ -111,9 +151,9 @@ export function createReliableRpc(options:ReliableRpcOptions):{
 }{
   const expectedChainId=options.network==='testnet'?46630:4663
   const endpoints=normalizedUrls(options).map<Endpoint>(url=>({url,validated:false,wrongChain:false,failures:0,latencyMs:null,lastError:null,cooldownUntil:0}))
-  const maxConcurrency=Math.max(1,Math.min(32,options.maxConcurrency??8))
-  const readRetries=Math.max(0,Math.min(3,options.readRetries??1))
-  const timeoutMs=Math.max(500,Math.min(30_000,options.timeoutMs??8_000))
+  const maxConcurrency=integerOption(options.maxConcurrency,8,1,32)
+  const readRetries=integerOption(options.readRetries,1,0,3)
+  const timeoutMs=integerOption(options.timeoutMs,8000,500,30000)
   const fetchFn=options.fetchFn??fetch
   const semaphore=new Semaphore(maxConcurrency)
   const pending=new Map<string,Promise<unknown>>()
@@ -125,11 +165,12 @@ export function createReliableRpc(options:ReliableRpcOptions):{
       const controller=new AbortController()
       const timer=setTimeout(()=>controller.abort(),timeoutMs)
       const started=Date.now()
+      const requestId=++id
       try{
         const response=await fetchFn(endpoint.url,{
           method:'POST',
           headers:{'content-type':'application/json','accept':'application/json'},
-          body:JSON.stringify({jsonrpc:'2.0',id:++id,method:args.method,params:args.params??[]}),
+          body:JSON.stringify({jsonrpc:'2.0',id:requestId,method:args.method,params:args.params??[]}),
           signal:controller.signal,
         })
         endpoint.latencyMs=Date.now()-started
@@ -139,12 +180,18 @@ export function createReliableRpc(options:ReliableRpcOptions):{
         if(!/json/i.test(contentType))throw new RpcTransportError('RPC response was not JSON',true)
         let body:any
         try{body=await response.json()}catch{throw new RpcTransportError('RPC returned invalid JSON',true)}
-        if(!body||body.jsonrpc!=='2.0')throw new RpcTransportError('RPC returned an invalid JSON-RPC envelope',true)
-        if(body.error){
-          const code=typeof body.error.code==='number'?body.error.code:undefined
-          const message=typeof body.error.message==='string'?body.error.message:'RPC request failed'
-          const retryable=code===-32005||RETRYABLE_MESSAGE.test(message)
-          throw new RpcResponseError(message,code,body.error.data,retryable)
+        const hasResult=body&&Object.prototype.hasOwnProperty.call(body,'result')
+        const hasError=body&&Object.prototype.hasOwnProperty.call(body,'error')
+        if(!body||typeof body!=='object'||Array.isArray(body)||body.jsonrpc!=='2.0'||
+          body.id!==requestId||hasResult===hasError)
+          throw new RpcTransportError('RPC returned an invalid JSON-RPC envelope',true)
+        if(hasError){
+          if(!body.error||typeof body.error!=='object'||Array.isArray(body.error)||
+            !Number.isInteger(body.error.code)||typeof body.error.message!=='string')
+            throw new RpcTransportError('RPC returned an invalid error envelope',true)
+          const {code,message,data}=body.error
+          const retryable=code===-32005||code===429||RETRYABLE_MESSAGE.test(message)
+          throw new RpcResponseError(message,code,data,retryable)
         }
         return body.result
       } catch(error){
@@ -155,17 +202,31 @@ export function createReliableRpc(options:ReliableRpcOptions):{
     })
   }
 
+  function failed(endpoint:Endpoint,error:unknown):void {
+    endpoint.failures++
+    endpoint.lastError=endpoint.wrongChain?'wrong-chain':errorLabel(error)
+    if((error as {retryable?:boolean}).retryable)
+      endpoint.cooldownUntil=Date.now()+Math.min(30_000,1_000*endpoint.failures)
+  }
+
   async function validate(endpoint:Endpoint):Promise<void>{
-    if(endpoint.validated)return
     if(endpoint.wrongChain)throw new RpcTransportError('RPC endpoint is on the wrong chain',false)
-    const result=await raw(endpoint,{method:'eth_chainId'})
-    const chainId=typeof result==='string'?Number.parseInt(result,16):Number.NaN
-    if(chainId!==expectedChainId){
-      endpoint.wrongChain=true
-      endpoint.lastError='wrong-chain'
-      throw new RpcTransportError('RPC endpoint is on the wrong chain',false)
+    if(endpoint.validated)return
+    if(!endpoint.validation){
+      endpoint.validation=(async()=>{
+        try {
+          const result=await raw(endpoint,{method:'eth_chainId'})
+          if(typeof result!=='string'||!/^0x[0-9a-f]+$/i.test(result))
+            throw new RpcTransportError('RPC returned an invalid chain ID',true)
+          if(BigInt(result)!==BigInt(expectedChainId)){
+            endpoint.wrongChain=true
+            throw new RpcTransportError('RPC endpoint is on the wrong chain',false)
+          }
+          endpoint.validated=true
+        }catch(error){failed(endpoint,error);throw error}
+      })().finally(()=>{endpoint.validation=undefined})
     }
-    endpoint.validated=true
+    await endpoint.validation
   }
 
   async function runRead(args:RpcArgs):Promise<unknown>{
@@ -175,10 +236,9 @@ export function createReliableRpc(options:ReliableRpcOptions):{
       const endpoint=endpoints[index]!
       if(endpoint.wrongChain||endpoint.cooldownUntil>now)continue
       try{await validate(endpoint)}catch(error){
-        endpoint.failures++;endpoint.lastError=errorLabel(error);last=error
+        last=error
         if(endpoint.wrongChain)continue
         if(!(error as {retryable?:boolean}).retryable)throw error
-        endpoint.cooldownUntil=Date.now()+Math.min(30_000,1_000*Math.max(1,endpoint.failures))
         continue
       }
       for(let attempt=0;attempt<=readRetries;attempt++){
@@ -203,22 +263,28 @@ export function createReliableRpc(options:ReliableRpcOptions):{
   }
 
   async function runUnsafe(args:RpcArgs):Promise<unknown>{
-    const endpoint=endpoints.find(x=>!x.wrongChain&&x.cooldownUntil<=Date.now())??endpoints.find(x=>!x.wrongChain)
-    if(!endpoint)throw new RpcTransportError('No RPC endpoint is available',false)
+    // Unknown methods and writes are primary-only, never coalesced or replayed.
+    const endpoint=endpoints[0]!
+    if(endpoint.wrongChain||endpoint.cooldownUntil>Date.now())
+      throw new RpcTransportError('Primary RPC endpoint is unavailable for this operation',false)
     await validate(endpoint)
     requests++
-    // Deliberately one request to one endpoint: retry/failover after an ambiguous submission
-    // can duplicate a transaction.
-    const value=await raw(endpoint,args)
-    activeEndpoint=endpoints.indexOf(endpoint)
-    return value
+    try {
+      const value=await raw(endpoint,args)
+      activeEndpoint=0
+      endpoint.failures=0;endpoint.lastError=null;endpoint.cooldownUntil=0
+      return value
+    }catch(error){failed(endpoint,error);throw error}
   }
 
   async function request(args:RpcArgs):Promise<unknown>{
-    const unsafe=UNSAFE.test(args.method)
-    if(unsafe)return runUnsafe(args)
+    // Node-local filter IDs cannot survive endpoint changes. Reject before any
+    // I/O so viem's existing watchers use stateless block-range getLogs instead.
+    if(FILTER_METHODS.has(args.method))
+      throw new RpcResponseError('Stateful filters are unsupported; use block-range logs',-32004)
+    if(!READ_METHODS.has(args.method))return runUnsafe(args)
     const key=args.method+':'+JSON.stringify(args.params??[])
-    const ttl=cacheTtl(args.method),cached=cache.get(key)
+    const ttl=cacheTtl(args),cached=cache.get(key)
     if(cached&&cached.expiresAt>Date.now()){cacheHits++;return cached.value}
     const existing=pending.get(key)
     if(existing){coalesced++;return existing}
