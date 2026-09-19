@@ -28,14 +28,19 @@ export class MarketActivityService {
     const asset=this.registry.get(getAddress(input.asset))
     if(!asset)throw new HubError(404,'UNKNOWN_ASSET','Asset is not in the Hub registry.')
     if(asset.address.toLowerCase()===this.market.usdg.toLowerCase())throw new HubError(422,'QUOTE_ASSET','USDG is the quote asset for direct-pool activity.')
-    await this.refresh(asset.address,asset.decimals)
+    let timeout:ReturnType<typeof setTimeout>|undefined
+    const outcome=await Promise.race([
+      this.refresh(asset.address,asset.decimals).then(()=> 'complete' as const,()=> 'unavailable' as const),
+      new Promise<'indexing'>(resolve=>{timeout=setTimeout(()=>resolve('indexing'),2000)}),
+    ])
+    if(timeout)clearTimeout(timeout)
     const now=this.clock(),rows=this.journal.marketSwaps(4663,asset.address,now-hours*3600_000,2000)
     const chronological=[...rows].reverse()
     const candles=aggregateCandles(chronological,intervalSeconds)
     return {
       chainId:4663,asset:{address:asset.address,symbol:asset.symbol,name:asset.name,decimals:asset.decimals,type:asset.type},
       quote:{address:this.market.usdg,symbol:'USDG',decimals:this.market.usdgDecimals},
-      hours,intervalSeconds,observedAt:now,candles,
+      hours,intervalSeconds,observedAt:now,candles,indexing:outcome==='indexing',indexingError:outcome==='unavailable'?'Swap indexing is temporarily unavailable; showing persisted observations.':null,
       trades:rows.slice(0,tradeLimit),
       indexedSwaps:rows.length,
       coverage:rows.length?{from:chronological[0]!.blockTime,to:chronological.at(-1)!.blockTime}:null,
@@ -65,13 +70,15 @@ export class MarketActivityService {
     const blockCache=new Map<string,{time:number;hash:string}>()
     for(const [pool,fee] of discovered){
       const prior=this.journal.latestMarketSwapBlock(4663,[pool])
-      const start=prior===null?(head>MAX_BACKFILL_BLOCKS?head-MAX_BACKFILL_BLOCKS:0n):(prior>REORG_OVERLAP_BLOCKS?prior-REORG_OVERLAP_BLOCKS:0n)
+      const floor=head>MAX_BACKFILL_BLOCKS?head-MAX_BACKFILL_BLOCKS:0n
+      const resume=prior===null?floor:(prior>REORG_OVERLAP_BLOCKS?prior-REORG_OVERLAP_BLOCKS:0n)
+      const start=resume>floor?resume:floor
       const rows:SwapRow[]=[]
       for(let from=start;from<=head;from+=LOG_CHUNK){
         const to=from+LOG_CHUNK-1n<head?from+LOG_CHUNK-1n:head
         const logs=await rpc.getLogs({address:pool,event:swapEvent,fromBlock:from,toBlock:to,strict:true})
         for(const log of logs){
-          if(log.removed||log.blockNumber===null||log.logIndex===null||!log.transactionHash||!log.blockHash)continue
+          if(log.removed||log.blockNumber===null||log.blockNumber<from||log.blockNumber>to||log.logIndex===null||!log.transactionHash||!log.blockHash)continue
           const blockKey=log.blockNumber.toString()
           let block=blockCache.get(blockKey)
           if(!block){
@@ -79,6 +86,7 @@ export class MarketActivityService {
             if(fetched.hash!==log.blockHash)continue
             block={time:Number(fetched.timestamp)*1000,hash:fetched.hash};blockCache.set(blockKey,block)
           }
+          if(block.hash!==log.blockHash)continue
           const token0=asset.toLowerCase()<this.market.usdg.toLowerCase()?asset:this.market.usdg
           const assetDelta=token0.toLowerCase()===asset.toLowerCase()?log.args.amount0:log.args.amount1
           const quoteDelta=token0.toLowerCase()===asset.toLowerCase()?log.args.amount1:log.args.amount0

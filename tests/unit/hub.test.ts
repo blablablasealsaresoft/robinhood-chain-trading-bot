@@ -54,13 +54,13 @@ describe('manual Hub adapter', () => {
     const f = fixture(); vi.mocked(f.market.client.public.getChainId).mockResolvedValue(1)
     await expect(f.service.quote(f.params)).rejects.toMatchObject({ code: 'CHAIN_MISMATCH' })
   })
-  it('requires a stock reference even with eligibility and keeps discovery gated', async () => {
+  it('requires wallet compliance even with eligibility and keeps discovery gated', async () => {
     const f = fixture()
     const stock = f.service.registry.list().find(x => x.type === 'stock-token')!
     expect(stock.tradable).toBe(false)
     f.market.client.acknowledgeStockTokenEligibility = true
     vi.spyOn(f.market,'stockChainlinkPrice').mockResolvedValue(null)
-    await expect(f.service.quote({ ...f.params, tokenOut: stock.address })).rejects.toMatchObject({ code: 'STOCK_REFERENCE_UNAVAILABLE' })
+    await expect(f.service.quote({ ...f.params, tokenOut: stock.address })).rejects.toMatchObject({ code: 'STOCK_COMPLIANCE_REQUIRED' })
     await expect(f.service.quote({ ...f.params, tokenOut: another })).rejects.toMatchObject({ code: 'ASSET_NOT_ENABLED' })
     const testnet = new Market({ ...config, network: 'testnet' })
     const service = new ManualSwapService(testnet, { chainId: 46630, maxSlippageBps: 100, isKilled: () => false, journal: f.journal })

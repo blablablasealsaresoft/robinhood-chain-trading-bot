@@ -53,6 +53,21 @@ describe('MarketActivityService',()=>{
   expect(f.journal.marketSwaps(4663,asset,now-3600000,20)).toHaveLength(2)
   f.journal.close()
  })
+ it('returns indexing state while a slow backfill continues without duplicate scans',async()=>{
+  vi.useFakeTimers()
+  const f=fixture();let release:((value:any[])=>void)|undefined
+  f.getLogs.mockImplementationOnce(()=>new Promise<any[]>(resolve=>{release=resolve}))
+  try{
+   const reading=f.service.read({asset})
+   await vi.advanceTimersByTimeAsync(2001)
+   const result=await reading
+   expect(result.indexing).toBe(true);expect(result.indexedSwaps).toBe(0)
+   const second=f.service.read({asset})
+   await vi.advanceTimersByTimeAsync(2001)
+   expect((await second).indexing).toBe(true);expect(f.getLogs).toHaveBeenCalledTimes(1)
+   release!([]);await vi.advanceTimersByTimeAsync(0)
+  }finally{vi.useRealTimers();f.journal.close()}
+ })
  it('rejects unsupported intervals, unknown assets and USDG as the activity asset',async()=>{
   const f=fixture()
   await expect(f.service.read({asset,hours:1,intervalSeconds:120})).rejects.toMatchObject({code:'INVALID_INTERVAL'})
