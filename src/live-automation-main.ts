@@ -7,8 +7,11 @@ import { PremiumWatch } from './strategies/premium-watch.js'
 const HARD={fleetDaily:50,agentDaily:25,position:10,slippageBps:100,minCooldownSeconds:60}
 
 function requireControlledConfig(){
-  const config=loadFleetConfig()
+  const base=loadFleetConfig()
   const live=loadLiveAutomationConfig()
+  const liveDb=process.env.HUB_LIVE_AUTOMATION_DB?.trim()
+  if(!liveDb)throw new Error('HUB_LIVE_AUTOMATION_DB is required so live signer state is isolated from the Hub Journal.')
+  const config={...base,dbPath:liveDb}
   if(!live.enabled)throw new Error('Controlled live automation is disabled. Set HUB_LIVE_AUTOMATION=I_UNDERSTAND_REAL_FUNDS explicitly.')
   if(config.mode!=='live'||!config.hasWallet||!config.privateKey)throw new Error('Controlled live automation requires HOOD_TRADERS_LIVE=1 and a valid dedicated ROBINHOOD_CHAIN_PRIVATE_KEY.')
   if(config.fleetMaxDailySpendUsdg<=0||config.fleetMaxDailySpendUsdg>HARD.fleetDaily)throw new Error('FLEET_MAX_DAILY_SPEND_USDG must be >0 and <= '+HARD.fleetDaily+' for controlled live automation.')
@@ -28,8 +31,6 @@ async function main(){
     'premium-1':{id:'premium-1',strategy:new PremiumWatch(),tickIntervalMs:30000},
   } as const
   fleet.addAgents(live.agents.map(id=>specs[id as keyof typeof specs]))
-  fleet.kill.arm()
-
   const chain=await fleet.market.client.public.getChainId()
   const expected=config.network==='testnet'?46630:4663
   if(chain!==expected){fleet.close();throw new Error('RPC chain mismatch before live automation start.')}
