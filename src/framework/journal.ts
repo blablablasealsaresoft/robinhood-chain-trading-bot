@@ -69,6 +69,8 @@ export class Journal {
         observed_at INTEGER NOT NULL, next_check_at INTEGER NOT NULL, payload TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_external_due ON external_events(type,next_check_at);
+      CREATE INDEX IF NOT EXISTS idx_external_owner_at
+        ON external_events(lower(json_extract(payload,'$.owner')), CAST(json_extract(payload,'$.at') AS INTEGER) DESC, id DESC);
 
       CREATE TABLE IF NOT EXISTS wallet_plans (
         id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, payload TEXT NOT NULL
@@ -79,6 +81,8 @@ export class Journal {
         PRIMARY KEY(chain_id, tx_hash)
       );
       CREATE INDEX IF NOT EXISTS idx_wallet_activity_observed ON wallet_activity(observed_at);
+      CREATE INDEX IF NOT EXISTS idx_wallet_activity_account_at
+        ON wallet_activity(lower(json_extract(payload,'$.account')), CAST(json_extract(payload,'$.at') AS INTEGER) DESC, tx_hash DESC);
 
       CREATE TABLE IF NOT EXISTS agent_state (
         agent_id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload TEXT NOT NULL
@@ -123,6 +127,8 @@ export class Journal {
         meta TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_decisions_agent_ts ON decisions(agent_id, ts);
+      CREATE INDEX IF NOT EXISTS idx_decisions_owner_ts
+        ON decisions(lower(json_extract(meta,'$.owner')), ts DESC, id DESC);
 
       CREATE TABLE IF NOT EXISTS equity (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
