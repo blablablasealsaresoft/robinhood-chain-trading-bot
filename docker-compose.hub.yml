@@ -25,6 +25,7 @@ services:
       HUB_LAUNCH_FACTORY: ${HUB_LAUNCH_FACTORY:-}
       HUB_LAUNCH_FACTORY_BLOCK: ${HUB_LAUNCH_FACTORY_BLOCK:-}
       HUB_ARB_REPO: ${HUB_ARB_REPO:-}
+      SHADOW_STATUS_DIR: /app/shadow-data/shadow
 
       HOOD_LLM_PROVIDER: ${HOOD_LLM_PROVIDER:-}
       HOOD_LLM_API_KEY: ${HOOD_LLM_API_KEY:-}
@@ -34,6 +35,7 @@ services:
 
     volumes:
       - trading-hub-data:/app/data
+      - trading-shadow-data:/app/shadow-data:ro
     restart: unless-stopped
     init: true
     read_only: true
@@ -43,5 +45,48 @@ services:
       - no-new-privileges:true
     stop_grace_period: 30s
 
+  shadow-fleet:
+    build:
+      context: .
+      dockerfile: Dockerfile.hub
+    command: ["node","dist/shadow-scheduler-main.js"]
+    environment:
+      HOOD_NETWORK: mainnet
+      HOOD_TRADERS_LIVE: '0'
+      ROBINHOOD_CHAIN_PRIVATE_KEY: ''
+      HOOD_STOCK_TOKEN_ELIGIBLE: 'false'
+      SHADOW_OUTPUT_DIR: /app/data/shadow
+      SHADOW_DURATION_MINUTES: ${SHADOW_DURATION_MINUTES:-55}
+      SHADOW_SCHEDULE_INTERVAL_MINUTES: ${SHADOW_SCHEDULE_INTERVAL_MINUTES:-240}
+      SHADOW_RETRY_MINUTES: ${SHADOW_RETRY_MINUTES:-15}
+      SHADOW_SNAPSHOT_SECONDS: ${SHADOW_SNAPSHOT_SECONDS:-60}
+
+      HOOD_RPC_URL: ${HOOD_RPC_URL:-}
+      HOOD_RPC_FALLBACK_URLS: ${HOOD_RPC_FALLBACK_URLS:-}
+      HOOD_RPC_MAX_CONCURRENCY: ${HOOD_RPC_MAX_CONCURRENCY:-8}
+      HOOD_RPC_READ_RETRIES: ${HOOD_RPC_READ_RETRIES:-1}
+      HOOD_RPC_TIMEOUT_MS: ${HOOD_RPC_TIMEOUT_MS:-8000}
+
+      HUB_LAUNCH_FACTORY: ${HUB_LAUNCH_FACTORY:-}
+      HUB_LAUNCH_FACTORY_BLOCK: ${HUB_LAUNCH_FACTORY_BLOCK:-}
+
+    volumes:
+      - trading-shadow-data:/app/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD","node","-e","const fs=require('fs');const p='/app/data/shadow/shadow-events.jsonl';try{const s=fs.statSync(p);process.exit(Date.now()-s.mtimeMs<18000000?0:1)}catch{process.exit(1)}"]
+      interval: 60s
+      timeout: 5s
+      start_period: 120s
+      retries: 5
+
 volumes:
   trading-hub-data:
+  trading-shadow-data:
