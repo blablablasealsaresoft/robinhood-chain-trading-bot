@@ -55,8 +55,8 @@ export class StockCompliancePolicy {
     return a
   }
 
-  async verifyAsset(symbol:string,address:Address,direction:'acquire'|'dispose'):Promise<StockPolicyCheck>{
-    const [assets,price]=await Promise.all([this.assets(),this.price(symbol)])
+  async verifyAsset(symbol:string,address:Address,direction:'acquire'|'dispose',forceFresh=false):Promise<StockPolicyCheck>{
+    const [assets,price]=await Promise.all([this.assets(forceFresh),this.price(symbol,forceFresh)])
     const asset=assets.find(row=>typeof row.tokenSymbol==='string'&&row.tokenSymbol.toUpperCase()===symbol.toUpperCase())
     if(!asset)throw new StockComplianceError('STOCK_ASSET_UNVERIFIED','Robinhood RHJ metadata does not list this Stock Token.')
     if(asset.status!=='ASSET_STATUS_ACTIVE')throw new StockComplianceError('STOCK_ASSET_INACTIVE','Robinhood RHJ metadata does not mark this Stock Token active.')
@@ -89,17 +89,17 @@ export class StockCompliancePolicy {
       extendedHoursFractionalTradability:extended,isTradingHalt:false,priceGeneratedAt:generated,checkedAt:now}
   }
 
-  private async assets():Promise<AssetRow[]> {
+  private async assets(forceFresh=false):Promise<AssetRow[]> {
     const now=this.clock()
-    if(this.assetCache&&now-this.assetCache.at<ASSET_CACHE_MS)return this.assetCache.rows
+    if(!forceFresh&&this.assetCache&&now-this.assetCache.at<ASSET_CACHE_MS)return this.assetCache.rows
     const body=await getJson(this.fetcher,ASSETS_URL)
     const rows=Array.isArray((body as any)?.assets)?(body as any).assets as AssetRow[]:[]
     if(!rows.length)throw new StockComplianceError('STOCK_METADATA_UNAVAILABLE','Robinhood RHJ Stock Token metadata is unavailable.')
     this.assetCache={at:now,rows};return rows
   }
-  private async price(symbol:string):Promise<PriceRow> {
+  private async price(symbol:string,forceFresh=false):Promise<PriceRow> {
     const key=symbol.toUpperCase(),now=this.clock(),cached=this.priceCache.get(key)
-    if(cached&&now-cached.at<10_000)return cached.row
+    if(!forceFresh&&cached&&now-cached.at<10_000)return cached.row
     const body=await getJson(this.fetcher,PRICE_URL+encodeURIComponent(key))
     const quotes=Array.isArray((body as any)?.quotes)?(body as any).quotes as PriceRow[]:[]
     const row=quotes.find(q=>typeof q.tokenSymbol==='string'&&q.tokenSymbol.toUpperCase()===key)
