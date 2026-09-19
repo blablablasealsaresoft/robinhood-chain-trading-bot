@@ -118,3 +118,12 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmClientCo
 export function loadLlmMinConfidence(env: NodeJS.ProcessEnv = process.env): number {
   return num('HOOD_LLM_MIN_CONFIDENCE', 0.6)
 }
+
+
+/** Hub API bind host. Defaults to loopback; containers must opt into 0.0.0.0 explicitly. */
+export function loadHubBindHost(env:NodeJS.ProcessEnv=process.env):string {
+  const value=(env.HUB_BIND_HOST||'127.0.0.1').trim()
+  if(!value||value.length>253||/[\s/\\]/.test(value)||value.includes('://'))throw new Error('HUB_BIND_HOST must be a hostname or IP address without a scheme or path')
+  if(!/^[A-Za-z0-9.:[\]-]+$/.test(value))throw new Error('HUB_BIND_HOST contains unsupported characters')
+  return value
+}
