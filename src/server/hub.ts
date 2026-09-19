@@ -16,6 +16,7 @@ import { LiquidityService } from '../hub/liquidity.js'
 import { MarketSeriesService } from '../hub/market-series.js'
 import { MarketActivityService } from '../hub/market-activity.js'
 import { StockCompliancePolicy } from '../hub/stock-compliance.js'
+import { shadowStatus } from '../hub/shadow-status.js'
 
 export function createHubHandler(fleet: Fleet, service?: ManualSwapService, options: {arbitrage?: ArbitrageMonitor; llmConfigurationError?: boolean; receipts?:WalletReceipts; reviewedAssets?:ReviewedTradeAsset[]; operatorToken?:string} = {}) {
   const market = new Market(fleet.config)
@@ -63,6 +64,8 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
       } else if (path === '/api/health' && req.method === 'GET') {
         const report=await hubHealth(fleet,swaps.registry.chainId,options.arbitrage)
         respond(res,report.ok?200:503,report)
+      } else if(path==='/api/shadow/status' && req.method==='GET') {
+        respond(res,200,shadowStatus(process.env.SHADOW_STATUS_DIR))
       } else if (path === '/api/assets' && req.method === 'GET') {
         respond(res, 200, { chainId: swaps.registry.chainId, assets: swaps.registry.list() })
       } else if(path==='/api/market/series' && req.method==='GET') {
