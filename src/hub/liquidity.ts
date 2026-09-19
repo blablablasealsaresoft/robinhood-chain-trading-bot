@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { MAINNET_ADDRESSES,V3_FEE_TIERS,erc20Abi,uniswapV3FactoryAbi } from 'hoodchain'
+import { MAINNET_ADDRESSES,V3_FEE_TIERS,erc20Abi,uniswapV3FactoryAbi,uniswapV3PoolAbi } from 'hoodchain'
 import { encodeFunctionData,getAddress,isAddress,zeroAddress,type Address } from 'viem'
 import type { Market } from '../framework/market.js'
 import type { Journal } from '../framework/journal.js'
@@ -29,6 +29,31 @@ export class LiquidityService {
     if(market.client.wallet||market.client.account)throw new Error('LiquidityService requires a signer-free Market')
   }
   private guard(){if(this.options.isKilled())throw new HubError(409,'KILLED','New liquidity preparations are halted.')}
+  async inspect(rawToken:unknown){
+    if(this.options.chainId!==4663)throw new HubError(422,'LIQUIDITY_NETWORK','Manual launch liquidity is enabled only on Robinhood Chain mainnet.')
+    if(typeof rawToken!=='string'||!isAddress(rawToken)||rawToken.toLowerCase()===zeroAddress)throw new HubError(400,'INVALID_TOKEN','Choose a valid launch token.')
+    const token=getAddress(rawToken),asset=this.registry.get(token)
+    if(!asset||asset.type!=='launch-token')throw new HubError(422,'LAUNCH_TOKEN_REQUIRED','Liquidity inspection is limited to verified Hub launch tokens.')
+    const rpc=this.market.client.public
+    if(await rpc.getChainId()!==4663)throw new HubError(503,'CHAIN_MISMATCH','Liquidity RPC network mismatch.')
+    const pools=[]
+    for(const fee of V3_FEE_TIERS){
+      const pool=await rpc.readContract({address:this.factory,abi:uniswapV3FactoryAbi,functionName:'getPool',args:[token,this.market.weth,fee]})
+      if(pool.toLowerCase()===zeroAddress)continue
+      const [code,liquidity,slot0]=await Promise.all([
+        rpc.getCode({address:pool}),
+        rpc.readContract({address:pool,abi:uniswapV3PoolAbi,functionName:'liquidity'}).catch(()=>null),
+        rpc.readContract({address:pool,abi:uniswapV3PoolAbi,functionName:'slot0'}).catch(()=>null),
+      ])
+      const initialized=!!code&&code!=='0x'&&liquidity!==null&&slot0!==null&&slot0[0]>0n
+      pools.push({fee,pool:getAddress(pool),initialized,liquidity:liquidity?.toString()??null,sqrtPriceX96:slot0?.[0]?.toString()??null})
+    }
+    const routeAvailable=pools.some(p=>p.initialized)?!!(await this.market.quoteBuy(this.market.weth,token,100_000_000_000_000n)):false
+    return {chainId:4663,token,asset,pools,routeAvailable,tradeEnabled:asset.tradable,
+      admission:asset.tradable?'operator-reviewed':'requires-operator-reviewed HUB_TRADE_ASSETS admission after pool verification',
+      observedAt:Date.now()}
+  }
+
   async prepare(input:Record<string,unknown>):Promise<PreparedLiquidity>{
     const allowed=['chainId','account','token','tokenAmount','wethAmount','fee','slippageBps']
     if(Object.keys(input).some(k=>!allowed.includes(k)))throw new HubError(400,'UNEXPECTED_FIELD','Unsupported liquidity field.')
@@ -106,7 +131,8 @@ function uint(value:unknown,label:string):bigint{
 function isqrt(value:bigint):bigint{
   if(value<0n)throw new Error('negative square root')
   if(value<2n)return value
-  let x0=1n<<(BigInt(value.toString(2).length)>>1n),x1=(x0+value/x0)>>1n
+  let x0=1n<<((BigInt(value.toString(2).length)+1n)>>1n)
+  let x1=(x0+value/x0)>>1n
   while(x1<x0){x0=x1;x1=(x0+value/x0)>>1n}
   return x0
 }
