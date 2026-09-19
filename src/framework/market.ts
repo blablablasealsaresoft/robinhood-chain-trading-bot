@@ -13,6 +13,7 @@ import {
 } from 'hoodchain'
 import { formatUnits, parseUnits, type Account, type Address } from 'viem'
 import type { FleetConfig } from './config.js'
+import { getSharedReliableRpc, type RpcDiagnosticsSnapshot } from './rpc.js'
 
 /** A memecoin/token spot price sourced from live Uniswap v3 liquidity. */
 export interface SpotPrice {
@@ -39,17 +40,31 @@ export class Market {
   readonly weth: Address
   readonly usdgDecimals = USDG_DECIMALS
   private ethUsdCache: { value: number; ts: number } | null = null
+  private readonly rpcDiagnosticsReader:()=>RpcDiagnosticsSnapshot
 
   constructor(config: FleetConfig, account?: Account) {
+    const rpc=getSharedReliableRpc({
+      network:config.network,
+      primaryUrl:config.rpcUrl,
+      fallbackUrls:config.rpcFallbackUrls,
+      maxConcurrency:config.rpcMaxConcurrency,
+      readRetries:config.rpcReadRetries,
+      timeoutMs:config.rpcTimeoutMs,
+    })
+    this.rpcDiagnosticsReader=rpc.diagnostics
     this.client = createHoodClient({
       chain: config.network,
-      rpcUrl: config.rpcUrl,
+      transport:rpc.transport,
       account,
       acknowledgeStockTokenEligibility: config.stockTokenEligible,
     })
     const addrs = config.network === 'testnet' ? TESTNET_ADDRESSES : MAINNET_ADDRESSES
     this.usdg = addrs.usdg
     this.weth = config.network === 'testnet' ? TESTNET_ADDRESSES.weth : MAINNET_ADDRESSES.weth
+  }
+
+  rpcDiagnostics():RpcDiagnosticsSnapshot {
+    return this.rpcDiagnosticsReader()
   }
 
   /** Latest block number — a cheap liveness/observe heartbeat. */
