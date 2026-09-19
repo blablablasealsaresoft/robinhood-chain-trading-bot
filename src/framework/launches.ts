@@ -8,6 +8,8 @@ import {
 } from 'hoodchain'
 import type { Address } from 'viem'
 
+const discoveryCache=new WeakMap<object,Map<string,Promise<Launch[]>>>()
+
 const ODYSSEY_FACTORIES: Address[] = [
   ODYSSEY_ADDRESSES.bondingCurveFactory,
   ODYSSEY_ADDRESSES.reflectionFactory,
@@ -17,6 +19,24 @@ const ODYSSEY_FACTORIES: Address[] = [
 export async function getRecentLaunchesReliable(
   client: HoodClient,
   options: { lookbackBlocks?: bigint; chunkSize?: bigint; onError?: (error: Error) => void } = {},
+): Promise<Launch[]> {
+  const lookback=options.lookbackBlocks??30_000n
+  const chunk=options.chunkSize??5_000n
+  const bucket=Math.floor(Date.now()/15_000)
+  const key=lookback.toString()+':'+chunk.toString()+':'+bucket
+  let cache=discoveryCache.get(client as object)
+  if(!cache){cache=new Map();discoveryCache.set(client as object,cache)}
+  const existing=cache.get(key)
+  if(existing)return existing
+  const request=scanRecentLaunches(client,{...options,lookbackBlocks:lookback,chunkSize:chunk})
+  cache.clear()
+  cache.set(key,request)
+  return request
+}
+
+async function scanRecentLaunches(
+  client: HoodClient,
+  options: { lookbackBlocks: bigint; chunkSize: bigint; onError?: (error: Error) => void },
 ): Promise<Launch[]> {
   const latest = await client.public.getBlockNumber()
   const lookback = options.lookbackBlocks ?? 30_000n
