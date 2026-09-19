@@ -102,8 +102,11 @@ describe('reliable RPC transport',()=>{
     const rpc=createReliableRpc({network:'mainnet',primaryUrl:'https://primary.example',fallbackUrls:['https://fallback.example'],readRetries:0,fetchFn})
     expect(await rpc.request({method:'eth_getLogs',params:[{}]})).toEqual([])
     expect(rpc.diagnostics().activeEndpoint).toBe(1)
-    await expect(rpc.request({method:'eth_sendRawTransaction',params:['0xdeadbeef']})).rejects.toThrow()
+
+    const unsafe=createReliableRpc({network:'mainnet',primaryUrl:'https://primary.example',fallbackUrls:['https://fallback.example'],readRetries:0,fetchFn})
+    await expect(unsafe.request({method:'eth_sendRawTransaction',params:['0xdeadbeef']})).rejects.toThrow()
     expect(calls.filter(x=>x.includes('eth_sendRawTransaction')).length).toBe(1)
+    expect(calls.some(x=>x.includes('fallback.example eth_sendRawTransaction'))).toBe(false)
   })
 
 })
