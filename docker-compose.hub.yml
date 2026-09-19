@@ -25,6 +25,7 @@ services:
       HUB_LAUNCH_FACTORY: ${HUB_LAUNCH_FACTORY:-}
       HUB_LAUNCH_FACTORY_BLOCK: ${HUB_LAUNCH_FACTORY_BLOCK:-}
       HUB_ARB_REPO: ${HUB_ARB_REPO:-}
+      SHADOW_STATUS_DIR: /app/shadow-data/shadow
 
       HOOD_LLM_PROVIDER: ${HOOD_LLM_PROVIDER:-}
       HOOD_LLM_API_KEY: ${HOOD_LLM_API_KEY:-}
@@ -34,6 +35,7 @@ services:
 
     volumes:
       - trading-hub-data:/app/data
+      - trading-shadow-data:/app/shadow-data:ro
     restart: unless-stopped
     init: true
     read_only: true
