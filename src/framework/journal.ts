@@ -108,6 +108,28 @@ export class Journal {
       );
       CREATE INDEX IF NOT EXISTS idx_market_samples_asset_time
         ON market_samples(chain_id, asset_key, observed_at);
+
+      CREATE TABLE IF NOT EXISTS market_swaps (
+        chain_id INTEGER NOT NULL,
+        pool TEXT NOT NULL,
+        tx_hash TEXT NOT NULL,
+        log_index INTEGER NOT NULL,
+        block_number TEXT NOT NULL,
+        block_hash TEXT NOT NULL,
+        block_time INTEGER NOT NULL,
+        asset TEXT NOT NULL,
+        quote TEXT NOT NULL,
+        fee INTEGER NOT NULL,
+        side TEXT NOT NULL,
+        asset_amount TEXT NOT NULL,
+        quote_amount TEXT NOT NULL,
+        price_quote REAL NOT NULL,
+        PRIMARY KEY(chain_id,pool,tx_hash,log_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_market_swaps_asset_time
+        ON market_swaps(chain_id,asset,block_time DESC);
+      CREATE INDEX IF NOT EXISTS idx_market_swaps_pool_block
+        ON market_swaps(chain_id,pool,CAST(block_number AS INTEGER));
       CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_account_time
         ON portfolio_snapshots(chain_id, account, observed_at);
 
@@ -343,6 +365,36 @@ export class Journal {
     return rows.map(row=>({value:JSON.parse(row.payload),at:Number(row.at),pageKey:row.page_key}))
   }
 
+
+  replaceMarketSwapWindow(chainId:number,pools:string[],fromBlock:bigint,rows:Array<{pool:string;txHash:string;logIndex:number;blockNumber:bigint;blockHash:string;blockTime:number;asset:string;quote:string;fee:number;side:'buy'|'sell';assetAmount:string;quoteAmount:string;priceQuote:number}>):void {
+    if(!pools.length)return
+    const unique=[...new Set(pools.map(p=>p.toLowerCase()))]
+    const placeholders=unique.map(()=>'?').join(',')
+    const transaction=this.db.transaction(()=>{
+      this.db.prepare('DELETE FROM market_swaps WHERE chain_id=? AND lower(pool) IN ('+placeholders+') AND CAST(block_number AS INTEGER)>=?')
+        .run(chainId,...unique,fromBlock.toString())
+      const insert=this.db.prepare(`INSERT INTO market_swaps
+        (chain_id,pool,tx_hash,log_index,block_number,block_hash,block_time,asset,quote,fee,side,asset_amount,quote_amount,price_quote)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      for(const row of rows)insert.run(chainId,row.pool.toLowerCase(),row.txHash.toLowerCase(),row.logIndex,row.blockNumber.toString(),row.blockHash.toLowerCase(),row.blockTime,row.asset.toLowerCase(),row.quote.toLowerCase(),row.fee,row.side,row.assetAmount,row.quoteAmount,row.priceQuote)
+      const cutoff=Date.now()-30*86400000
+      this.db.prepare('DELETE FROM market_swaps WHERE block_time<?').run(cutoff)
+    })
+    transaction()
+  }
+  marketSwaps(chainId:number,asset:string,sinceMs:number,limit=500):Array<{pool:string;txHash:string;logIndex:number;blockNumber:string;blockHash:string;blockTime:number;asset:string;quote:string;fee:number;side:'buy'|'sell';assetAmount:string;quoteAmount:string;priceQuote:number}> {
+    const bounded=Math.max(1,Math.min(2000,Math.trunc(limit)))
+    const rows=this.db.prepare(`SELECT pool,tx_hash,log_index,block_number,block_hash,block_time,asset,quote,fee,side,asset_amount,quote_amount,price_quote
+      FROM market_swaps WHERE chain_id=? AND asset=? AND block_time>=? ORDER BY block_time DESC,CAST(block_number AS INTEGER) DESC,log_index DESC LIMIT ?`)
+      .all(chainId,asset.toLowerCase(),sinceMs,bounded) as Array<Record<string,unknown>>
+    return rows.map(row=>({pool:String(row.pool),txHash:String(row.tx_hash),logIndex:Number(row.log_index),blockNumber:String(row.block_number),blockHash:String(row.block_hash),blockTime:Number(row.block_time),asset:String(row.asset),quote:String(row.quote),fee:Number(row.fee),side:row.side as 'buy'|'sell',assetAmount:String(row.asset_amount),quoteAmount:String(row.quote_amount),priceQuote:Number(row.price_quote)}))
+  }
+  latestMarketSwapBlock(chainId:number,pools:string[]):bigint|null {
+    if(!pools.length)return null
+    const unique=[...new Set(pools.map(p=>p.toLowerCase()))],placeholders=unique.map(()=>'?').join(',')
+    const row=this.db.prepare('SELECT MAX(CAST(block_number AS INTEGER)) AS n FROM market_swaps WHERE chain_id=? AND lower(pool) IN ('+placeholders+')').get(chainId,...unique) as {n:number|null}
+    return row.n===null?null:BigInt(row.n)
+  }
 
   recordMarketSample(sample:{chainId:number;assetKey:string;observedAt:number;priceUsd:number|null;referenceUsd:number|null;dexUsd:number|null;spreadBps:number|null;source:string}):void {
     if(!Number.isSafeInteger(sample.observedAt)||sample.observedAt<0)throw new Error('Invalid market sample timestamp')

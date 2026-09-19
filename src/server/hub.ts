@@ -14,6 +14,7 @@ import type { ArbitrageMonitor } from '../hub/arbitrage-monitor.js'
 import type { ReviewedTradeAsset } from '../hub/assets.js'
 import { LiquidityService } from '../hub/liquidity.js'
 import { MarketSeriesService } from '../hub/market-series.js'
+import { MarketActivityService } from '../hub/market-activity.js'
 import { StockCompliancePolicy } from '../hub/stock-compliance.js'
 
 export function createHubHandler(fleet: Fleet, service?: ManualSwapService, options: {arbitrage?: ArbitrageMonitor; llmConfigurationError?: boolean; receipts?:WalletReceipts; reviewedAssets?:ReviewedTradeAsset[]; operatorToken?:string} = {}) {
@@ -30,6 +31,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
   const wraps=new NativeWrapService(market,{chainId:swaps.registry.chainId,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal})
   const liquidity=new LiquidityService(market,swaps.registry,{chainId:swaps.registry.chainId,maxSlippageBps:fleet.config.defaultLimits.maxSlippageBps,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal})
   const marketSeries=new MarketSeriesService(market,swaps.registry,fleet.journal)
+  const marketActivity=new MarketActivityService(market,swaps.registry,fleet.journal)
   const receipts=options.receipts ?? new WalletReceipts(market,fleet.journal,swaps.registry.chainId)
   const factory=process.env.HUB_LAUNCH_FACTORY||process.env.HUB_LAUNCH_FACTORY_ADDRESS
   if(process.env.HUB_LAUNCH_FACTORY&&process.env.HUB_LAUNCH_FACTORY_ADDRESS&&process.env.HUB_LAUNCH_FACTORY.toLowerCase()!==process.env.HUB_LAUNCH_FACTORY_ADDRESS.toLowerCase())throw new Error('Conflicting Hub factory configuration')
@@ -48,7 +50,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     return secretEqual(auth.slice(7),operatorToken)
   }
   const handle=async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-    if (!/^\/api\/(status|health|assets|market\/series|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
+    if (!/^\/api\/(status|health|assets|market\/(?:series|activity)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
     try {
       const origin = req.headers.origin
       if (origin && new URL(origin).host !== req.headers.host) throw new HubError(403, 'ORIGIN_NOT_ALLOWED', 'Use the configured same-origin Hub API proxy.')
@@ -57,7 +59,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         const summary = fleet.summary()
         respond(res, 200, { apiVersion: 1, chainId: swaps.registry.chainId, mode: summary.mode, killed: summary.killed, controlToken: controls && !operatorToken ? controlToken : null,
           operatorAuthConfigured: !!operatorToken, operatorAuthenticated: !!operatorToken && authorizedControl(req),
-          capabilities: { quote: true, manualSwapPreparation: true, manualBroadcast: false, marketSeries: true, nativeWrap: true, walletReceiptVerification: true, bridgeObservation: true, launchJournal: true, launchpad: true, portfolio: true, stockPricing: true, stockTrading: swaps.registry.chainId===4663, stockAcquisition: swaps.registry.chainId===4663 && !!market.client.acknowledgeStockTokenEligibility && stockCompliance.configured, stockAcquisitionWalletScoped:true, manualLiquidityPreparation: swaps.registry.chainId===4663, strategyControl: controls } })
+          capabilities: { quote: true, manualSwapPreparation: true, manualBroadcast: false, marketSeries: true, realSwapCandles: true, nativeWrap: true, walletReceiptVerification: true, bridgeObservation: true, launchJournal: true, launchpad: true, portfolio: true, stockPricing: true, stockTrading: swaps.registry.chainId===4663, stockAcquisition: swaps.registry.chainId===4663 && !!market.client.acknowledgeStockTokenEligibility && stockCompliance.configured, stockAcquisitionWalletScoped:true, manualLiquidityPreparation: swaps.registry.chainId===4663, strategyControl: controls } })
       } else if (path === '/api/health' && req.method === 'GET') {
         const report=await hubHealth(fleet,swaps.registry.chainId,options.arbitrage)
         respond(res,report.ok?200:503,report)
@@ -69,6 +71,12 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         for(const key of allowed)if(url.searchParams.getAll(key).length>1)throw new HubError(400,'DUPLICATE_PARAMETER','Market series parameters must not be repeated.')
         const rawHours=url.searchParams.get('hours'),rawLimit=url.searchParams.get('limit')
         respond(res,200,await marketSeries.read({asset:url.searchParams.get('asset'),symbol:url.searchParams.get('symbol'),hours:rawHours===null?undefined:Number(rawHours),limit:rawLimit===null?undefined:Number(rawLimit)}))
+      } else if(path==='/api/market/activity' && req.method==='GET') {
+        const allowed=new Set(['asset','hours','interval','limit'])
+        for(const key of url.searchParams.keys())if(!allowed.has(key))throw new HubError(400,'UNEXPECTED_PARAMETER','Market activity request contains unsupported parameters.')
+        for(const key of allowed)if(url.searchParams.getAll(key).length>1)throw new HubError(400,'DUPLICATE_PARAMETER','Market activity parameters must not be repeated.')
+        const rawHours=url.searchParams.get('hours'),rawInterval=url.searchParams.get('interval'),rawLimit=url.searchParams.get('limit')
+        respond(res,200,await marketActivity.read({asset:url.searchParams.get('asset'),hours:rawHours===null?undefined:Number(rawHours),intervalSeconds:rawInterval===null?undefined:Number(rawInterval),tradeLimit:rawLimit===null?undefined:Number(rawLimit)}))
       } else if(path === '/api/liquidity' && req.method === 'GET') {
         if(url.searchParams.getAll('token').length!==1||[...url.searchParams.keys()].some(k=>k!=='token'))throw new HubError(400,'INVALID_QUERY','Supply exactly one token parameter.')
         respond(res,200,await liquidity.inspect(url.searchParams.get('token')))
