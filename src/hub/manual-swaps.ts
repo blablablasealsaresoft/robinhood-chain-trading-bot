@@ -5,6 +5,7 @@ import type { Market } from '../framework/market.js'
 import type { Journal } from '../framework/journal.js'
 import { AssetRegistry, type ReviewedTradeAsset } from './assets.js'
 import type { HubQuote, PreparedSwap } from './types.js'
+import { StockComplianceError,type StockCompliancePolicy } from './stock-compliance.js'
 
 export class HubError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message) }
@@ -13,6 +14,7 @@ export interface ManualSwapOptions {
   chainId: number; maxSlippageBps: number; isKilled: () => boolean
   journal: Pick<Journal, 'recordDecision'> & Partial<Pick<Journal, 'recordWalletPlan'>>; clock?: () => number
   reviewedAssets?: ReviewedTradeAsset[]
+  stockCompliance?: StockCompliancePolicy
 }
 type QuoteEntry = { response: HubQuote; quote: SwapQuote }
 const UINT256_MAX = (1n << 256n) - 1n
@@ -55,7 +57,11 @@ export class ManualSwapService {
     const stockIn=tokenIn.type==='stock-token',stockOut=tokenOut.type==='stock-token'
     if ((!stockIn && !tokenIn.tradable) || (!stockOut && !tokenOut.tradable)) throw new HubError(403, 'ASSET_NOT_ENABLED', 'This asset is not in the manual trading allowlist.')
     if(stockIn&&stockOut)throw new HubError(422,'STOCK_PAIR_UNSUPPORTED','Stock Token to Stock Token swaps are not enabled.')
-    if(stockOut&&!this.market.client.acknowledgeStockTokenEligibility)throw new HubError(403,'STOCK_ELIGIBILITY_REQUIRED','Stock Token acquisition requires the configured eligibility acknowledgement.')
+    if(stockOut){
+      if(!this.market.client.acknowledgeStockTokenEligibility)throw new HubError(403,'STOCK_ELIGIBILITY_REQUIRED','Stock Token acquisition requires the operator eligibility acknowledgement.')
+      if(!this.options.stockCompliance)throw new HubError(403,'STOCK_COMPLIANCE_REQUIRED','Wallet-scoped Stock Token compliance is not configured.')
+      try{this.options.stockCompliance.requireAcquisition(account)}catch(error){throw stockPolicyError(error)}
+    }
     if(stockIn||stockOut){
       if(this.options.chainId!==4663)throw new HubError(422,'STOCK_NETWORK','Stock Token manual trading is enabled only on Robinhood Chain mainnet.')
       const quoteAsset=stockIn?tokenOut:tokenIn
@@ -71,8 +77,11 @@ export class ManualSwapService {
     await this.network()
     await Promise.all([this.verifyReviewedAsset(tokenIn),this.verifyReviewedAsset(tokenOut)])
     let stockReference:Awaited<ReturnType<Market['stockChainlinkPrice']>>=null
+    let stockPolicy:Awaited<ReturnType<StockCompliancePolicy['verifyAsset']>>|undefined
     if(stockIn||stockOut){
       const stock=stockIn?tokenIn:tokenOut
+      if(!this.options.stockCompliance)throw new HubError(503,'STOCK_COMPLIANCE_UNAVAILABLE','Stock Token market-policy verification is not configured.')
+      try{stockPolicy=await this.options.stockCompliance.verifyAsset(stock.symbol,stock.address,stockOut?'acquire':'dispose')}catch(error){throw stockPolicyError(error)}
       stockReference=await this.market.stockChainlinkPrice(stock.symbol,STOCK_REFERENCE_MAX_AGE_SECONDS)
       if(!stockReference||!Number.isFinite(stockReference.priceUsd)||stockReference.priceUsd<=0)throw new HubError(422,'STOCK_REFERENCE_UNAVAILABLE','A fresh Stock Token reference price is unavailable.')
     }
@@ -103,7 +112,8 @@ export class ManualSwapService {
       const deviationBps=Math.round(Math.abs(executionPriceUsd/stockReference.priceUsd-1)*10000)
       if(!Number.isFinite(deviationBps)||deviationBps>STOCK_MAX_DEVIATION_BPS)
         throw new HubError(422,'STOCK_PRICE_DEVIATION','The DEX execution price differs too far from the Stock Token reference price.')
-      stockSafety={symbol:stock.symbol,referencePriceUsd:stockReference.priceUsd,referenceUpdatedAt:stockReference.updatedAt*1000,executionPriceUsd,deviationBps,maxDeviationBps:STOCK_MAX_DEVIATION_BPS,maxReferenceAgeSeconds:STOCK_REFERENCE_MAX_AGE_SECONDS,acquisitionEligibilityRequired:stockOut}
+      stockSafety={symbol:stock.symbol,referencePriceUsd:stockReference.priceUsd,referenceUpdatedAt:stockReference.updatedAt*1000,executionPriceUsd,deviationBps,maxDeviationBps:STOCK_MAX_DEVIATION_BPS,maxReferenceAgeSeconds:STOCK_REFERENCE_MAX_AGE_SECONDS,acquisitionEligibilityRequired:stockOut,
+        rhjAssetStatus:stockPolicy!.assetStatus,rhjFractionalTradability:stockPolicy!.fractionalTradability,rhjAllDayTradability:stockPolicy!.allDayTradability,rhjTradingHalt:stockPolicy!.isTradingHalt,rhjCheckedAt:stockPolicy!.checkedAt}
     }
     const minimum = quote.amountOut * BigInt(10000 - slippageBps) / 10000n
     if (minimum === 0n) throw new HubError(422, 'AMOUNT_TOO_SMALL', 'The quoted output is too small to enforce a positive minimum.')
@@ -138,6 +148,11 @@ export class ManualSwapService {
     if (account !== response.account) throw new HubError(409, 'ACCOUNT_MISMATCH', 'The wallet differs from the quoted account. Request a fresh quote.')
     await this.network()
     if(response.stockSafety){
+      const stock=response.tokenIn.type==='stock-token'?response.tokenIn:response.tokenOut
+      const acquiring=response.tokenOut.type==='stock-token'
+      if(!this.options.stockCompliance)throw new HubError(503,'STOCK_COMPLIANCE_UNAVAILABLE','Stock Token market-policy verification is not configured.')
+      if(acquiring){try{this.options.stockCompliance.requireAcquisition(account)}catch(error){throw stockPolicyError(error)}}
+      try{await this.options.stockCompliance.verifyAsset(response.stockSafety.symbol,stock.address,acquiring?'acquire':'dispose')}catch(error){throw stockPolicyError(error)}
       const current=await this.market.stockChainlinkPrice(response.stockSafety.symbol,response.stockSafety.maxReferenceAgeSeconds)
       if(!current)throw new HubError(422,'STOCK_REFERENCE_UNAVAILABLE','A fresh Stock Token reference price is no longer available. Request a new quote.')
     }
@@ -181,4 +196,9 @@ function address(value: unknown, field: string): Address {
 }
 function exactFields(input: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(input).some(key => !allowed.includes(key))) throw new HubError(400, 'UNEXPECTED_FIELD', 'Request contains unsupported fields.')
+}
+
+function stockPolicyError(error:unknown):HubError {
+  if(error instanceof StockComplianceError)return new HubError(error.code.includes('UPSTREAM')||error.code.includes('UNAVAILABLE')?503:403,error.code,error.message)
+  return new HubError(503,'STOCK_COMPLIANCE_UNAVAILABLE','Stock Token compliance checks could not be completed.')
 }
