@@ -328,3 +328,34 @@ describe('wallet-scoped Activity pagination',()=>{
   expect(()=>read.activityPage(a,10,'not!base64')).toThrow()
  })
 })
+
+
+describe('wallet-scoped Activity HTTP boundary',()=>{
+ it('returns wallet scope with pagination metadata and keeps legacy global feed separate',async()=>{
+  const {fleet}=fixture()
+  const account='0x1111111111111111111111111111111111111111'
+  fleet.journal.recordWalletActivity({planId:'p1',chainId:4663,account,txHash:('0x'+'a'.repeat(64)) as `0x${string}`,kind:'swap',status:'confirmed',at:1000,observedAt:1100,blockNumber:'1',blockHash:('0x'+'b'.repeat(64)) as `0x${string}`})
+  fleet.journal.recordDecision({agentId:'bot-1',ts:900,kind:'alert',detail:'operator event',meta:{}})
+  const handle=createHubHandler(fleet)
+  const server=createServer(async(req,res)=>{await handle(req,res,new URL(req.url!,'http://localhost'))});servers.push(server)
+  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r))
+  const base='http://127.0.0.1:'+(server.address() as {port:number}).port
+  const scoped=await fetch(base+'/api/activity?account='+account+'&limit=10')
+  expect(scoped.status).toBe(200)
+  expect(await scoped.json()).toMatchObject({account:getAddress(account),scope:'wallet',limit:10,nextCursor:null,events:[{source:'user-wallet'}]})
+  const global=await fetch(base+'/api/activity')
+  expect(await global.json()).toMatchObject({scope:'operator-global',nextCursor:null})
+ })
+
+ it('rejects duplicate, unsupported and malformed pagination parameters',async()=>{
+  const {fleet}=fixture()
+  const handle=createHubHandler(fleet)
+  const server=createServer(async(req,res)=>{await handle(req,res,new URL(req.url!,'http://localhost'))});servers.push(server)
+  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r))
+  const base='http://127.0.0.1:'+(server.address() as {port:number}).port
+  const account='0x1111111111111111111111111111111111111111'
+  expect((await fetch(base+'/api/activity?account='+account+'&limit=2&limit=3')).status).toBe(400)
+  expect((await fetch(base+'/api/activity?account='+account+'&extra=1')).status).toBe(400)
+  expect((await fetch(base+'/api/activity?account='+account+'&cursor=bad!')).status).toBe(400)
+ })
+})
