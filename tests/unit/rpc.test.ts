@@ -88,4 +88,22 @@ describe('reliable RPC transport',()=>{
     expect(sendCalls).toBe(1)
     expect(fetchFn.mock.calls.some(([url])=>String(url).includes('fallback.example'))).toBe(false)
   })
+  it('fails over safe reads after HTTP 400 but never replays writes',async()=>{
+    const calls:string[]=[]
+    const fetchFn=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const url=String(input),body=JSON.parse(String(init?.body)) as {id:number;method:string}
+      calls.push(url+' '+body.method)
+      if(body.method==='eth_chainId')return json(rpcResult(body.id,'0x1237'))
+      if(url.includes('primary')&&body.method==='eth_getLogs')return json({error:'bad request'},400)
+      if(body.method==='eth_getLogs')return json(rpcResult(body.id,[]))
+      if(body.method==='eth_sendRawTransaction')return json({error:'bad request'},400)
+      return json(rpcResult(body.id,null))
+    })
+    const rpc=createReliableRpc({network:'mainnet',primaryUrl:'https://primary.example',fallbackUrls:['https://fallback.example'],readRetries:0,fetchFn})
+    expect(await rpc.request({method:'eth_getLogs',params:[{}]})).toEqual([])
+    expect(rpc.diagnostics().activeEndpoint).toBe(1)
+    await expect(rpc.request({method:'eth_sendRawTransaction',params:['0xdeadbeef']})).rejects.toThrow()
+    expect(calls.filter(x=>x.includes('eth_sendRawTransaction')).length).toBe(1)
+  })
+
 })
