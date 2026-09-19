@@ -1,0 +1,47 @@
+services:
+  trading-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile.hub
+    # Raw Hub API stays host-local; terminate HTTPS and authenticate operator
+    # traffic in a reverse proxy / gateway on the same host.
+    ports:
+      - '127.0.0.1:4670:4670'
+    environment:
+      HOOD_NETWORK: ${HOOD_NETWORK:-mainnet}
+      DASHBOARD_PORT: '4670'
+      HUB_BIND_HOST: '0.0.0.0'
+      KILL_FILE: /app/data/KILL
+      HOOD_TRADERS_DB: /app/data/hood-traders.db
+
+      HOOD_RPC_URL: ${HOOD_RPC_URL:-}
+      HOOD_RPC_FALLBACK_URLS: ${HOOD_RPC_FALLBACK_URLS:-}
+      HOOD_RPC_MAX_CONCURRENCY: ${HOOD_RPC_MAX_CONCURRENCY:-8}
+      HOOD_RPC_READ_RETRIES: ${HOOD_RPC_READ_RETRIES:-1}
+      HOOD_RPC_TIMEOUT_MS: ${HOOD_RPC_TIMEOUT_MS:-8000}
+
+      HUB_OPERATOR_TOKEN: ${HUB_OPERATOR_TOKEN:-}
+      HUB_TRADE_ASSETS: ${HUB_TRADE_ASSETS:-}
+      HUB_LAUNCH_FACTORY: ${HUB_LAUNCH_FACTORY:-}
+      HUB_LAUNCH_FACTORY_BLOCK: ${HUB_LAUNCH_FACTORY_BLOCK:-}
+      HUB_ARB_REPO: ${HUB_ARB_REPO:-}
+
+      HOOD_LLM_PROVIDER: ${HOOD_LLM_PROVIDER:-}
+      HOOD_LLM_API_KEY: ${HOOD_LLM_API_KEY:-}
+      HOOD_LLM_MODEL: ${HOOD_LLM_MODEL:-}
+      HOOD_LLM_MIN_CONFIDENCE: ${HOOD_LLM_MIN_CONFIDENCE:-0.6}
+      HOOD_LLM_TIMEOUT_MS: ${HOOD_LLM_TIMEOUT_MS:-9000}
+
+    volumes:
+      - trading-hub-data:/app/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  trading-hub-data:
