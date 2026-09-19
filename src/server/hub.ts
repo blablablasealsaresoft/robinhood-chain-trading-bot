@@ -5,6 +5,7 @@ import { NativeWrapService } from '../hub/native-wrap.js'
 import { WalletReceipts } from '../hub/wallet-receipts.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { getAddress,isAddress } from 'viem'
 import type { Fleet } from '../framework/fleet.js'
 import { Market } from '../framework/market.js'
 import { HubError, ManualSwapService } from '../hub/manual-swaps.js'
@@ -63,8 +64,9 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         respond(res, 200, { chainId: swaps.registry.chainId, assets: swaps.registry.list() })
       } else if(path==='/api/stock-compliance' && req.method==='GET') {
         const account=url.searchParams.get('account')
-        if(url.searchParams.getAll('account').length!==1||[...url.searchParams.keys()].some(k=>k!=='account')||!account)throw new HubError(400,'INVALID_QUERY','Supply exactly one account parameter.')
-        respond(res,200,{account,status:stockCompliance.publicStatus(account),source:'external-attestation',storesIdentityData:false})
+        if(url.searchParams.getAll('account').length!==1||[...url.searchParams.keys()].some(k=>k!=='account')||!account||!isAddress(account))throw new HubError(400,'INVALID_QUERY','Supply exactly one valid account parameter.')
+        const normalized=getAddress(account)
+        respond(res,200,{account:normalized,status:stockCompliance.publicStatus(normalized),source:'external-attestation',storesIdentityData:false})
       } else if(path === '/api/liquidity' && req.method === 'GET') {
         if(url.searchParams.getAll('token').length!==1||[...url.searchParams.keys()].some(k=>k!=='token'))throw new HubError(400,'INVALID_QUERY','Supply exactly one token parameter.')
         respond(res,200,await liquidity.inspect(url.searchParams.get('token')))
@@ -105,8 +107,9 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
           respond(res, 200, { events: read.activity(), scope:'operator-global', nextCursor:null })
         }
       } else if (path === '/api/risk' && req.method === 'GET') {
-        respond(res, 200, { ...fleet.summary(), limits: fleet.config.defaultLimits, stockTradingEnabled: swaps.registry.chainId===4663, stockAcquisitionEnabled: swaps.registry.chainId===4663&&fleet.config.stockTokenEligible, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null, onchainExecutorPaused: null })
+        respond(res, 200, { ...fleet.summary(), limits: fleet.config.defaultLimits, stockTradingEnabled: swaps.registry.chainId===4663, stockAcquisitionEnabled: swaps.registry.chainId===4663&&fleet.config.stockTokenEligible&&stockCompliance.configured, stockAcquisitionWalletScoped:true, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null, onchainExecutorPaused: null })
       } else if (path.startsWith('/api/stocks/') && req.method === 'GET') {
+        if([...url.searchParams.keys()].some(k=>k!=='account')||url.searchParams.getAll('account').length>1)throw new HubError(400,'INVALID_QUERY','Stock Token detail accepts at most one account parameter.')
         respond(res, 200, await read.stock(decodeURIComponent(path.split('/')[3]!),url.searchParams.get('account')))
       } else if (path.startsWith('/api/strategies') && req.method === 'GET') {
         const strategies = read.strategies()
