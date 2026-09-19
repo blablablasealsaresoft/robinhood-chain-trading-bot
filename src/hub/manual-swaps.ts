@@ -199,6 +199,10 @@ function exactFields(input: Record<string, unknown>, allowed: string[]): void {
 }
 
 function stockPolicyError(error:unknown):HubError {
-  if(error instanceof StockComplianceError)return new HubError(error.code.includes('UPSTREAM')||error.code.includes('UNAVAILABLE')?503:403,error.code,error.message)
+  if(error instanceof StockComplianceError){
+    const temporary=new Set(['STOCK_ASSET_INACTIVE','STOCK_OPENING_UNAVAILABLE','STOCK_CLOSING_UNAVAILABLE','STOCK_TRADING_HALTED'])
+    const upstream=error.code.includes('UPSTREAM')||error.code.includes('UNAVAILABLE')||error.code.includes('STALE')
+    return new HubError(upstream?503:temporary.has(error.code)?409:403,error.code,error.message)
+  }
   return new HubError(503,'STOCK_COMPLIANCE_UNAVAILABLE','Stock Token compliance checks could not be completed.')
 }
