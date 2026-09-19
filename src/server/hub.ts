@@ -14,15 +14,17 @@ import type { ArbitrageMonitor } from '../hub/arbitrage-monitor.js'
 import type { ReviewedTradeAsset } from '../hub/assets.js'
 import { LiquidityService } from '../hub/liquidity.js'
 import { MarketSeriesService } from '../hub/market-series.js'
+import { StockCompliancePolicy } from '../hub/stock-compliance.js'
 
 export function createHubHandler(fleet: Fleet, service?: ManualSwapService, options: {arbitrage?: ArbitrageMonitor; llmConfigurationError?: boolean; receipts?:WalletReceipts; reviewedAssets?:ReviewedTradeAsset[]; operatorToken?:string} = {}) {
   const market = new Market(fleet.config)
+  const stockCompliance=new StockCompliancePolicy(process.env.HUB_STOCK_COMPLIANCE_ATTESTATIONS)
   const swaps = service ?? new ManualSwapService(market, {
     chainId: fleet.config.network === 'testnet' ? 46630 : 4663,
     maxSlippageBps: fleet.config.defaultLimits.maxSlippageBps,
-    isKilled: () => fleet.kill.isKilled(), journal: fleet.journal, reviewedAssets:options.reviewedAssets,
+    isKilled: () => fleet.kill.isKilled(), journal: fleet.journal, reviewedAssets:options.reviewedAssets,stockCompliance,
   })
-  const read = new HubReadModel(fleet, market, swaps.registry)
+  const read = new HubReadModel(fleet, market, swaps.registry,stockCompliance)
   const discovery = new LaunchDiscovery(market,swaps.registry,fleet.journal)
   const bridges=new BridgeObservations(market,fleet.journal)
   const wraps=new NativeWrapService(market,{chainId:swaps.registry.chainId,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal})
@@ -55,7 +57,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         const summary = fleet.summary()
         respond(res, 200, { apiVersion: 1, chainId: swaps.registry.chainId, mode: summary.mode, killed: summary.killed, controlToken: controls && !operatorToken ? controlToken : null,
           operatorAuthConfigured: !!operatorToken, operatorAuthenticated: !!operatorToken && authorizedControl(req),
-          capabilities: { quote: true, manualSwapPreparation: true, manualBroadcast: false, marketSeries: true, nativeWrap: true, walletReceiptVerification: true, bridgeObservation: true, launchJournal: true, launchpad: true, portfolio: true, stockPricing: true, stockTrading: swaps.registry.chainId===4663, stockAcquisition: swaps.registry.chainId===4663 && !!market.client.acknowledgeStockTokenEligibility, manualLiquidityPreparation: swaps.registry.chainId===4663, strategyControl: controls } })
+          capabilities: { quote: true, manualSwapPreparation: true, manualBroadcast: false, marketSeries: true, nativeWrap: true, walletReceiptVerification: true, bridgeObservation: true, launchJournal: true, launchpad: true, portfolio: true, stockPricing: true, stockTrading: swaps.registry.chainId===4663, stockAcquisition: swaps.registry.chainId===4663 && !!market.client.acknowledgeStockTokenEligibility && stockCompliance.configured, stockAcquisitionWalletScoped:true, manualLiquidityPreparation: swaps.registry.chainId===4663, strategyControl: controls } })
       } else if (path === '/api/health' && req.method === 'GET') {
         const report=await hubHealth(fleet,swaps.registry.chainId,options.arbitrage)
         respond(res,report.ok?200:503,report)
@@ -107,8 +109,9 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
           respond(res, 200, { events: read.activity(), scope:'operator-global', nextCursor:null })
         }
       } else if (path === '/api/risk' && req.method === 'GET') {
-        respond(res, 200, { ...fleet.summary(), limits: fleet.config.defaultLimits, stockTradingEnabled: swaps.registry.chainId===4663, stockAcquisitionEnabled: swaps.registry.chainId===4663&&fleet.config.stockTokenEligible, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null, onchainExecutorPaused: null })
+        respond(res, 200, { ...fleet.summary(), limits: fleet.config.defaultLimits, stockTradingEnabled: swaps.registry.chainId===4663, stockAcquisitionEnabled: swaps.registry.chainId===4663&&fleet.config.stockTokenEligible&&stockCompliance.configured, stockAcquisitionWalletScoped:true, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null, onchainExecutorPaused: null })
       } else if (path.startsWith('/api/stocks/') && req.method === 'GET') {
+        if([...url.searchParams.keys()].length)throw new HubError(400,'INVALID_QUERY','Stock Token detail does not accept query parameters.')
         respond(res, 200, await read.stock(decodeURIComponent(path.split('/')[3]!)))
       } else if (path.startsWith('/api/strategies') && req.method === 'GET') {
         const strategies = read.strategies()
