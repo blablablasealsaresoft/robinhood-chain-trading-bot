@@ -2,6 +2,7 @@ import { erc20Abi, formatUnits, getAddress, isAddress, type Address } from 'viem
 import type { Fleet } from '../framework/fleet.js'
 import type { Market } from '../framework/market.js'
 import type { AssetRegistry } from './assets.js'
+import type { StockCompliancePolicy } from './stock-compliance.js'
 import { HubError } from './manual-swaps.js'
 
 /** Read adapter: valuation never grants permission to acquire a security. */
@@ -11,7 +12,7 @@ export class HubReadModel {
   private tokenPriceCache = new Map<string,{at:number;value:{price:number;source:string}|null}>()
   private tokenPricePending = new Map<string,Promise<{price:number;source:string}|null>>()
   private probeCursor=0
-  constructor(private fleet: Fleet, private market: Market, private registry: AssetRegistry) {}
+  constructor(private fleet: Fleet, private market: Market, private registry: AssetRegistry, private stockCompliance?:StockCompliancePolicy) {}
   async checkChain() {
     if (await this.market.client.public.getChainId() !== this.registry.chainId) throw new HubError(503, 'CHAIN_MISMATCH', 'The RPC returned a different network.')
   }
@@ -118,9 +119,10 @@ export class HubReadModel {
   async stock(symbol: string) {
     const token = this.registry.list().find(a => a.type === 'stock-token' && a.symbol === symbol.toUpperCase())
     if (!token) throw new HubError(404, 'UNKNOWN_STOCK', 'This Stock Token is not in the network registry.')
-    const cached = this.stocksCache.get(token.symbol)
+    const stockCacheKey=token.symbol
+    const cached = this.stocksCache.get(stockCacheKey)
     if (cached && Date.now()-cached.at < 30_000) return cached.value
-    const pending = this.stocksPending.get(token.symbol)
+    const pending = this.stocksPending.get(stockCacheKey)
     if (pending) return pending
     const request = (async () => {
       await this.checkChain()
@@ -131,14 +133,15 @@ export class HubReadModel {
         dexPriceUsd: dex, premiumBps: reference && dex !== null ? (dex/reference.priceUsd-1)*10000 : null,
         liquidityUsd: null,
         tradingEnabled: this.registry.chainId===4663 && dex!==null,
-        acquisitionEnabled: this.registry.chainId===4663 && dex!==null && this.market.client.acknowledgeStockTokenEligibility,
+        acquisitionEnabled: this.registry.chainId===4663 && dex!==null && this.market.client.acknowledgeStockTokenEligibility && !!this.stockCompliance?.configured,
+        acquisitionRequiresWalletAttestation:true,
         eligibilityAcknowledged: !!this.market.client.acknowledgeStockTokenEligibility,
         dexStatus: dex === null ? 'unavailable' : 'quoted',
         observedAt: Date.now(), probeUsdg: '10' }
-      this.stocksCache.set(token.symbol, { at: Date.now(), value })
+      this.stocksCache.set(stockCacheKey, { at: Date.now(), value })
       return value
-    })().finally(() => this.stocksPending.delete(token.symbol))
-    this.stocksPending.set(token.symbol, request)
+    })().finally(() => this.stocksPending.delete(stockCacheKey))
+    this.stocksPending.set(stockCacheKey, request)
     return request
   }
   private async tokenSpotPrice(asset:{address:Address;decimals:number}):Promise<{price:number;source:string}|null> {
