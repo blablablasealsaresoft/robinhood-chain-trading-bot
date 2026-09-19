@@ -1,5 +1,5 @@
 import { formatUnits, type Account, type Address, type Hash } from 'viem'
-import { buildSwapTx, ensureApproval, type SwapQuote } from 'hoodchain'
+import { buildSwapTx, erc20Abi, type SwapQuote } from 'hoodchain'
 import type { AgentStateRecord, Journal } from './journal.js'
 import type { Market } from './market.js'
 import { RiskEngine, utcDayStart } from './risk.js'
@@ -87,7 +87,7 @@ export class Agent {
     this.kill = opts.kill
     this.account = opts.account
     this.clock = opts.clock ?? Date.now
-    if(this.mode==='paper')this.restoreState()
+    this.restoreState()
   }
 
   /** Begin the tick loop and wire the strategy's stream subscriptions. */
@@ -302,6 +302,7 @@ export class Agent {
       this.spentTodayUsd += notionalUsd
       this.opts.reportFleetSpend(notionalUsd)
     }
+    if(this.mode==='live')this.pendingLive=undefined
     this.persistState(now)
   }
 
@@ -310,18 +311,35 @@ export class Agent {
     sim: SwapQuote,
     slippageBps: number,
   ): Promise<{ hash: Hash; amountOutMinimum: bigint } | null> {
-    if (!this.account) return null
+    if (!this.account || !this.market.client.wallet) return null
+    if(this.pendingLive)throw new Error('Live execution is unresolved and requires operator reconciliation before another transaction.')
     try {
       const tx = buildSwapTx(this.market.client, sim, { slippageBps })
-      await ensureApproval(this.market.client, intent.side === 'buy' ? intent.quoteToken : intent.token, intent.amountIn)
-      const hash = await this.market.client.wallet!.sendTransaction({
+      const inputToken=intent.side === 'buy' ? intent.quoteToken : intent.token
+      const router=this.market.addresses().router
+      const allowance=await this.market.client.public.readContract({address:inputToken,abi:erc20Abi,functionName:'allowance',args:[this.account.address,router]})
+      if(allowance<intent.amountIn){
+        this.lastError='Live automation requires a pre-approved router allowance; it never broadcasts approval transactions.'
+        return null
+      }
+      const nonce=await this.market.client.public.getTransactionCount({address:this.account.address,blockTag:'pending'})
+      this.pendingLive={phase:'prepared',nonce,at:this.clock()}
+      this.persistState()
+      const hash = await this.market.client.wallet.sendTransaction({
         to: tx.to,
         data: tx.data,
         value: tx.value,
+        nonce,
         account: this.account,
         chain: this.market.client.chain,
       })
-      await this.market.client.public.waitForTransactionReceipt({ hash })
+      this.pendingLive={phase:'submitted',nonce,hash,at:this.pendingLive.at}
+      this.persistState()
+      const receipt=await this.market.client.public.waitForTransactionReceipt({ hash })
+      if(receipt.status!=='success'){
+        this.lastError='Live swap reverted: '+hash
+        return null
+      }
       return { hash, amountOutMinimum: tx.amountOutMinimum }
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err)
@@ -413,24 +431,28 @@ export class Agent {
   }
 
   private lastTradeId=0
-  private get stateScope():string { return this.opts.stateScope ?? "paper:"+this.market.usdg.toLowerCase() }
+  private pendingLive:{phase:'prepared'|'submitted';nonce:number;hash?:string;at:number}|undefined
+  private get stateScope():string { return this.opts.stateScope ?? this.mode+":"+this.market.usdg.toLowerCase() }
 
   private restoreState():void {
     const saved=this.journal.agentState(this.id)
-    const latestId=this.journal.latestTradeId(this.id,'paper')
+    const latestId=this.journal.latestTradeId(this.id,this.mode)
+    const label=this.mode+' agent'
     if(!saved) {
-      if(latestId>0)throw new Error('Persisted paper agent state is missing for '+this.id+'; existing trades require reconciliation.')
+      if(latestId>0)throw new Error('Persisted '+label+' state is missing for '+this.id+'; existing trades require reconciliation.')
       return
     }
-    if(saved.version!==1||saved.mode!=='paper'||saved.agentId!==this.id||saved.strategyId!==this.strategy.id)throw new Error('Persisted paper agent state is incompatible for '+this.id)
-    if(saved.lastTradeId!==latestId)throw new Error('Persisted paper agent state is stale for '+this.id)
-    if(saved.stateScope!==this.stateScope)throw new Error('Persisted paper agent state scope is incompatible for '+this.id)
+    if(saved.version!==1||saved.mode!==this.mode||saved.agentId!==this.id||saved.strategyId!==this.strategy.id)throw new Error('Persisted '+label+' state is incompatible for '+this.id)
+    if(saved.lastTradeId!==latestId)throw new Error('Persisted '+label+' state is stale for '+this.id)
+    if(saved.stateScope!==this.stateScope)throw new Error('Persisted '+label+' state scope is incompatible for '+this.id)
+    if(saved.pendingLive&&this.mode==='live')throw new Error('Persisted live execution is unresolved for '+this.id+'; reconcile nonce '+saved.pendingLive.nonce+(saved.pendingLive.hash?' / '+saved.pendingLive.hash:'')+' before restart.')
+    if(saved.pendingLive&&this.mode!=='live')throw new Error('Persisted paper state contains live execution metadata for '+this.id)
     if(!Number.isSafeInteger(saved.updatedAt)||saved.updatedAt<0||!Array.isArray(saved.positions)||
       !(saved.lastTradeAt===null||Number.isSafeInteger(saved.lastTradeAt)&&saved.lastTradeAt>=0)||
-      !(saved.lastTickAt===null||Number.isSafeInteger(saved.lastTickAt)&&saved.lastTickAt>=0))throw new Error('Persisted paper agent state is invalid for '+this.id)
+      !(saved.lastTickAt===null||Number.isSafeInteger(saved.lastTickAt)&&saved.lastTickAt>=0))throw new Error('Persisted '+label+' state is invalid for '+this.id)
     this.lastTradeId=latestId
     if(!Number.isFinite(saved.realizedUsd)||!Number.isFinite(saved.spentTodayUsd)||saved.spentTodayUsd<0||!Number.isInteger(saved.spentDay)||
-      !Number.isInteger(saved.ticks)||saved.ticks<0||!Number.isInteger(saved.trades)||saved.trades<0||!Number.isInteger(saved.refusals)||saved.refusals<0)throw new Error('Persisted paper agent state is invalid for '+this.id)
+      !Number.isInteger(saved.ticks)||saved.ticks<0||!Number.isInteger(saved.trades)||saved.trades<0||!Number.isInteger(saved.refusals)||saved.refusals<0)throw new Error('Persisted '+label+' state is invalid for '+this.id)
     const now=this.clock(),today=utcDayStart(now)
     this.realizedUsd=saved.realizedUsd
     this.lastTradeAt=saved.lastTradeAt
@@ -444,24 +466,24 @@ export class Agent {
     for(const raw of saved.positions){
       if(!/^0x[0-9a-fA-F]{40}$/.test(raw.token)||!/^0x[0-9a-fA-F]{40}$/.test(raw.quoteToken)||!/^\d+$/.test(raw.amount)||!/^\d+$/.test(raw.costBasis)||
         !Number.isFinite(raw.investedUsd)||raw.investedUsd<0||!Number.isInteger(raw.openedAt)||raw.openedAt<0||
-        !(raw.markUsd===null||Number.isFinite(raw.markUsd)))throw new Error('Persisted paper position is invalid for '+this.id)
+        !(raw.markUsd===null||Number.isFinite(raw.markUsd)))throw new Error('Persisted '+label+' position is invalid for '+this.id)
       const position:Position={
         token:raw.token as Address,tokenSymbol:raw.tokenSymbol,amount:BigInt(raw.amount),costBasis:BigInt(raw.costBasis),
         investedUsd:raw.investedUsd,quoteToken:raw.quoteToken as Address,quoteSymbol:raw.quoteSymbol,
         openedAt:raw.openedAt,markUsd:raw.markUsd,meta:raw.meta??{},
       }
-      if(this.positions.has(position.token.toLowerCase()))throw new Error('Duplicate persisted paper position for '+this.id)
+      if(this.positions.has(position.token.toLowerCase()))throw new Error('Duplicate persisted '+label+' position for '+this.id)
       if(position.amount>DUST)this.positions.set(position.token.toLowerCase(),position)
     }
     if(this.spentTodayUsd>0&&this.opts.restoreFleetSpend!==false)this.opts.reportFleetSpend(this.spentTodayUsd)
   }
 
   private persistState(now=this.clock()):void {
-    if(this.mode!=='paper')return
     const state:AgentStateRecord={
-      version:1,agentId:this.id,strategyId:this.strategy.id,mode:'paper',updatedAt:now,lastTradeId:this.lastTradeId,stateScope:this.stateScope,
+      version:1,agentId:this.id,strategyId:this.strategy.id,mode:this.mode,updatedAt:now,lastTradeId:this.lastTradeId,stateScope:this.stateScope,
       spentDay:this.spentDay,spentTodayUsd:round(this.spentTodayUsd),lastTradeAt:this.lastTradeAt,realizedUsd:round(this.realizedUsd),
       ticks:this.ticks,trades:this.trades,refusals:this.refusals,lastTickAt:this.lastTickAt,
+      ...(this.pendingLive?{pendingLive:{...this.pendingLive}}:{}),
       positions:[...this.positions.values()].map(p=>({
         token:p.token,tokenSymbol:p.tokenSymbol,amount:p.amount.toString(),costBasis:p.costBasis.toString(),
         investedUsd:p.investedUsd,quoteToken:p.quoteToken,quoteSymbol:p.quoteSymbol,openedAt:p.openedAt,
