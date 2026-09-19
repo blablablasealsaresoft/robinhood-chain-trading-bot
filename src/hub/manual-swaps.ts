@@ -152,7 +152,7 @@ export class ManualSwapService {
       const acquiring=response.tokenOut.type==='stock-token'
       if(!this.options.stockCompliance)throw new HubError(503,'STOCK_COMPLIANCE_UNAVAILABLE','Stock Token market-policy verification is not configured.')
       if(acquiring){try{this.options.stockCompliance.requireAcquisition(account)}catch(error){throw stockPolicyError(error)}}
-      try{await this.options.stockCompliance.verifyAsset(response.stockSafety.symbol,stock.address,acquiring?'acquire':'dispose')}catch(error){throw stockPolicyError(error)}
+      try{await this.options.stockCompliance.verifyAsset(response.stockSafety.symbol,stock.address,acquiring?'acquire':'dispose',true)}catch(error){throw stockPolicyError(error)}
       const current=await this.market.stockChainlinkPrice(response.stockSafety.symbol,response.stockSafety.maxReferenceAgeSeconds)
       if(!current)throw new HubError(422,'STOCK_REFERENCE_UNAVAILABLE','A fresh Stock Token reference price is no longer available. Request a new quote.')
     }
