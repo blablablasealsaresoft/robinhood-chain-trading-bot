@@ -4,13 +4,13 @@ import { dirname } from 'node:path'
 import type { DecisionRecord, EquityPoint, TradeRecord } from './types.js'
 
 /**
- * The decision journal â€” the agent's black box recorder. Every observe, every
+ * The decision journal — the agent's black box recorder. Every observe, every
  * refusal, every trade (paper or live), and every equity mark lands here so the
  * dashboard can answer "why did this trade fire?" and the whole run is auditable
  * after the fact.
  *
  * SQLite via better-sqlite3 (synchronous, zero-config, embedded). bigints are
- * stored as decimal TEXT â€” SQLite integers are 64-bit signed and token amounts
+ * stored as decimal TEXT — SQLite integers are 64-bit signed and token amounts
  * routinely exceed that, so TEXT is the only lossless option.
  */
 
@@ -204,7 +204,7 @@ export class Journal {
          WHERE agent_id=? AND ts>=? AND side='buy' AND quote_symbol=?`,
       )
       .all(agentId, sinceMs, quoteSymbol) as { amount_in: string }[]
-    // amount_in is USDG (6dp) smallest units â†’ dollars
+    // amount_in is USDG (6dp) smallest units → dollars
     return rows.reduce((sum, r) => sum + Number(BigInt(r.amount_in)) / 1e6, 0)
   }
 
@@ -266,7 +266,7 @@ export class Journal {
     }))
   }
 
-  /** All trades across every agent, newest first â€” for the fleet-wide feed. */
+  /** All trades across every agent, newest first — for the fleet-wide feed. */
   allRecentTrades(limit = 100): TradeRecord[] {
     const rows = this.db
       .prepare(`SELECT * FROM trades ORDER BY ts DESC LIMIT ?`)
