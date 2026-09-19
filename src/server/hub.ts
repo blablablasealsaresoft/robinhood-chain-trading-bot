@@ -53,7 +53,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         const summary = fleet.summary()
         respond(res, 200, { apiVersion: 1, chainId: swaps.registry.chainId, mode: summary.mode, killed: summary.killed, controlToken: controls && !operatorToken ? controlToken : null,
           operatorAuthConfigured: !!operatorToken, operatorAuthenticated: !!operatorToken && authorizedControl(req),
-          capabilities: { quote: true, manualSwapPreparation: true, manualBroadcast: false, nativeWrap: true, walletReceiptVerification: true, bridgeObservation: true, launchJournal: true, launchpad: true, portfolio: true, stockPricing: true, stockTrading: false, manualLiquidityPreparation: swaps.registry.chainId===4663, strategyControl: controls } })
+          capabilities: { quote: true, manualSwapPreparation: true, manualBroadcast: false, nativeWrap: true, walletReceiptVerification: true, bridgeObservation: true, launchJournal: true, launchpad: true, portfolio: true, stockPricing: true, stockTrading: swaps.registry.chainId===4663, stockAcquisition: swaps.registry.chainId===4663 && !!market.client.acknowledgeStockTokenEligibility, manualLiquidityPreparation: swaps.registry.chainId===4663, strategyControl: controls } })
       } else if (path === '/api/health' && req.method === 'GET') {
         const report=await hubHealth(fleet,swaps.registry.chainId,options.arbitrage)
         respond(res,report.ok?200:503,report)

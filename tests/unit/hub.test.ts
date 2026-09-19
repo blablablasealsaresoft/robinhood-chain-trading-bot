@@ -53,12 +53,13 @@ describe('manual Hub adapter', () => {
     const f = fixture(); vi.mocked(f.market.client.public.getChainId).mockResolvedValue(1)
     await expect(f.service.quote(f.params)).rejects.toMatchObject({ code: 'CHAIN_MISMATCH' })
   })
-  it('does not turn discovery or operator stock eligibility into manual permission', async () => {
+  it('requires a stock reference even with eligibility and keeps discovery gated', async () => {
     const f = fixture()
     const stock = f.service.registry.list().find(x => x.type === 'stock-token')!
     expect(stock.tradable).toBe(false)
     f.market.client.acknowledgeStockTokenEligibility = true
-    await expect(f.service.quote({ ...f.params, tokenOut: stock.address })).rejects.toMatchObject({ code: 'ASSET_NOT_ENABLED' })
+    vi.spyOn(f.market,'stockChainlinkPrice').mockResolvedValue(null)
+    await expect(f.service.quote({ ...f.params, tokenOut: stock.address })).rejects.toMatchObject({ code: 'STOCK_REFERENCE_UNAVAILABLE' })
     await expect(f.service.quote({ ...f.params, tokenOut: another })).rejects.toMatchObject({ code: 'ASSET_NOT_ENABLED' })
     const testnet = new Market({ ...config, network: 'testnet' })
     const service = new ManualSwapService(testnet, { chainId: 46630, maxSlippageBps: 100, isKilled: () => false, journal: f.journal })
@@ -76,7 +77,7 @@ describe('manual Hub adapter', () => {
     vi.mocked(f.market.client.public.readContract).mockImplementationOnce(async()=>6 as never)
     await expect(service.quote({...f.params,tokenOut:reviewed})).rejects.toMatchObject({code:'ASSET_METADATA_MISMATCH'})
     const stock=service.registry.list().find(x=>x.type==='stock-token')!
-    await expect(service.quote({...f.params,tokenOut:stock.address})).rejects.toMatchObject({code:'ASSET_NOT_ENABLED'})
+    await expect(service.quote({...f.params,tokenOut:stock.address})).rejects.toMatchObject({code:'STOCK_ELIGIBILITY_REQUIRED'})
   })
   it('rejects any signer-bearing Market client', () => {
     const f = fixture()
