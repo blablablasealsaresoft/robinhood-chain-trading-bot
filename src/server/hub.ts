@@ -79,7 +79,15 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
       } else if (path === '/api/positions' && req.method === 'GET') {
         respond(res, 200, { positions: read.positions(), scope: fleet.config.mode === 'paper' ? 'persisted-paper-state' : 'current-process', mode: fleet.config.mode })
       } else if (path === '/api/activity' && req.method === 'GET') {
-        respond(res, 200, { events: read.activity() })
+        const account=url.searchParams.get('account')
+        if(account!==null){
+          const allowed=new Set(['account','limit','cursor'])
+          for(const key of url.searchParams.keys())if(!allowed.has(key))throw new HubError(400,'UNEXPECTED_PARAMETER','Activity request contains unsupported parameters.')
+          for(const key of allowed)if(url.searchParams.getAll(key).length>1)throw new HubError(400,'DUPLICATE_PARAMETER','Activity query parameters must not be repeated.')
+          const rawLimit=url.searchParams.get('limit')
+          const limit=rawLimit===null?50:Number(rawLimit)
+          respond(res,200,read.activityPage(account,limit,url.searchParams.get('cursor')))
+        } else respond(res, 200, { events: read.activity(), scope:'operator-global', nextCursor:null })
       } else if (path === '/api/risk' && req.method === 'GET') {
         respond(res, 200, { ...fleet.summary(), limits: fleet.config.defaultLimits, stockTradingEnabled: false, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null, onchainExecutorPaused: null })
       } else if (path.startsWith('/api/stocks/') && req.method === 'GET') {
