@@ -1,0 +1,39 @@
+# Production-oriented signerless Trading Hub API image.
+# This intentionally starts dist/hub-main.js, not the original autonomous fleet.
+
+FROM node:20-slim AS build
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY package.json package-lock.json* ./
+RUN npm ci
+COPY tsconfig.json tsup.config.ts ./
+COPY src ./src
+RUN npm run build && npm prune --omit=dev
+
+FROM node:20-slim AS runtime
+ENV NODE_ENV=production \
+    DASHBOARD_PORT=4670 \
+    HUB_BIND_HOST=0.0.0.0 \
+    HOOD_TRADERS_DB=/app/data/hood-traders.db \
+    KILL_FILE=/app/data/KILL
+
+RUN useradd --create-home --uid 1001 hood
+WORKDIR /app
+
+COPY --from=build --chown=hood:hood /app/package.json ./package.json
+COPY --from=build --chown=hood:hood /app/node_modules ./node_modules
+COPY --from=build --chown=hood:hood /app/dist ./dist
+
+RUN mkdir -p /app/data && chown -R hood:hood /app
+USER hood
+
+EXPOSE 4670
+VOLUME ["/app/data"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["node","-e","fetch('http://127.0.0.1:4670/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
+CMD ["node","dist/hub-main.js"]
