@@ -20,6 +20,31 @@ HUBLIFE creation, 0.001 ETH contribution and 1,000-token claim are confirmed; fi
 
 The Docker/live-fleet entrypoints below start the original framework, not the complete Hub beta.
 
+## Signerless Hub container
+
+The beta Hub has a dedicated container profile. It is intentionally separate from the original autonomous fleet Dockerfile.
+
+```bash
+docker compose -f docker-compose.hub.yml up --build -d
+curl http://127.0.0.1:4670/api/health
+```
+
+The profile:
+- starts `dist/hub-main.js`, never `dist/main.js`
+- forces the Hub's signerless/paper execution boundary in code
+- publishes the raw API only on host loopback (`127.0.0.1:4670`)
+- persists SQLite at `/app/data/hood-traders.db`
+- runs as an unprivileged user with a read-only root filesystem
+- exposes a Docker healthcheck backed by `GET /api/health`
+- does not accept or forward `ROBINHOOD_CHAIN_PRIVATE_KEY`
+- expects HTTPS and user/operator authentication to terminate at a same-host reverse proxy or gateway
+
+Set `HUB_BIND_HOST=0.0.0.0` only inside the container. Local direct runs continue to default to `127.0.0.1`.
+
+For beta, configure a dedicated `HOOD_RPC_URL`, at least one `HOOD_RPC_FALLBACK_URLS` endpoint, a strong `HUB_OPERATOR_TOKEN`, reviewed `HUB_TRADE_ASSETS`, and the verified launch factory variables. Store secrets in the deployment platform's secret manager or an untracked environment file; `.dockerignore` excludes local environment files and data.
+
+The persistent volume is part of the application's safety state: it contains wallet receipt reconciliation, launch/bridge observations, portfolio history and paper risk state. Back it up before upgrades and verify restore procedures in staging. Do not replace the volume as a routine redeploy.
+
 ## Shared RPC reliability
 
 Market/Fleet clients and the verified launch startup share the same transport instance for matching configuration. Configure process environment before startup:
