@@ -1,7 +1,7 @@
 import { WalletReceipts } from './hub/wallet-receipts.js'
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
-import { loadFleetConfig, loadLlmConfig, loadLlmMinConfidence } from './framework/config.js'
+import { loadFleetConfig, loadHubBindHost, loadLlmConfig, loadLlmMinConfidence } from './framework/config.js'
 import { Fleet } from './framework/fleet.js'
 import { LaunchSniper } from './strategies/launch-sniper.js'
 import { Momentum } from './strategies/momentum.js'
@@ -13,6 +13,7 @@ import { parseReviewedTradeAssets } from './hub/assets.js'
 
 // Keep user-wallet preparation and autonomous execution on separate signing paths.
 const config = { ...loadFleetConfig(), mode: 'paper' as const, privateKey: undefined, hasWallet: false }
+const bindHost=loadHubBindHost()
 const fleet = new Fleet(config)
 fleet.addAgents([
   { id: 'sniper-1', strategy: new LaunchSniper(), tickIntervalMs: 4000 },
@@ -36,7 +37,7 @@ const server = createServer(async (req, res) => {
   if (!await handle(req, res, new URL(req.url ?? '/', 'http://localhost'))) respond(res,404,{error:{code:'NOT_AVAILABLE',message:'Unknown Hub API endpoint.'}})
 })
 server.requestTimeout=15000
-server.listen(config.dashboardPort,'127.0.0.1',()=>console.log('Hub API: http://127.0.0.1:'+config.dashboardPort+'; paper strategies and arbitrage monitor stopped until requested'))
+server.listen(config.dashboardPort,bindHost,()=>console.log('Hub API listening on '+bindHost+':'+config.dashboardPort+'; paper strategies and arbitrage monitor stopped until requested'))
 let closing=false
 async function close() {
  if(closing)return
