@@ -11,7 +11,7 @@ export interface HubQuote {
   gasEstimate: string; estimatedNetworkFeeWei: string | null; priceImpactBps: null
   source: 'hoodchain/uniswap-v3'; route: { path: Address[]; fees: number[] }
   createdAt: number; expiresAt: number
-  stockSafety?: {symbol:string;referencePriceUsd:number;referenceUpdatedAt:number;executionPriceUsd:number;deviationBps:number;maxDeviationBps:number;maxReferenceAgeSeconds:number;acquisitionEligibilityRequired:boolean}
+  stockSafety?: {symbol:string;referencePriceUsd:number;referenceUpdatedAt:number;executionPriceUsd:number;deviationBps:number;maxDeviationBps:number;maxReferenceAgeSeconds:number;acquisitionEligibilityRequired:boolean;rhjAssetStatus:string;rhjFractionalTradability:string|null;rhjAllDayTradability:string|null;rhjTradingHalt:boolean;rhjCheckedAt:number}
 }
 export interface WalletTransaction { to: Address; data: Hex; value: string }
 export interface PreparedSwap {
