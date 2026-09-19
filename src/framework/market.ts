@@ -138,9 +138,9 @@ export class Market {
   }
 
   /** Chainlink price for a Stock Token (already multiplier-adjusted). */
-  async stockChainlinkPrice(symbol: string): Promise<StockQuote | null> {
+  async stockChainlinkPrice(symbol: string, maxAgeSeconds?: number): Promise<StockQuote | null> {
     try {
-      return await getQuote(this.client, symbol)
+      return await getQuote(this.client, symbol, maxAgeSeconds===undefined?{}:{maxAgeSeconds})
     } catch {
       return null
     }
