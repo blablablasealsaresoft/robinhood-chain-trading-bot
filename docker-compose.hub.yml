@@ -43,5 +43,42 @@ services:
       - no-new-privileges:true
     stop_grace_period: 30s
 
+  shadow-fleet:
+    build:
+      context: .
+      dockerfile: Dockerfile.hub
+    command: ["node","dist/shadow-scheduler-main.js"]
+    environment:
+      HOOD_NETWORK: mainnet
+      HOOD_TRADERS_LIVE: '0'
+      ROBINHOOD_CHAIN_PRIVATE_KEY: ''
+      HOOD_STOCK_TOKEN_ELIGIBLE: 'false'
+      SHADOW_OUTPUT_DIR: /app/data/shadow
+      SHADOW_DURATION_MINUTES: ${SHADOW_DURATION_MINUTES:-55}
+      SHADOW_SCHEDULE_INTERVAL_MINUTES: ${SHADOW_SCHEDULE_INTERVAL_MINUTES:-240}
+      SHADOW_RETRY_MINUTES: ${SHADOW_RETRY_MINUTES:-15}
+      SHADOW_SNAPSHOT_SECONDS: ${SHADOW_SNAPSHOT_SECONDS:-60}
+
+      HOOD_RPC_URL: ${HOOD_RPC_URL:-}
+      HOOD_RPC_FALLBACK_URLS: ${HOOD_RPC_FALLBACK_URLS:-}
+      HOOD_RPC_MAX_CONCURRENCY: ${HOOD_RPC_MAX_CONCURRENCY:-8}
+      HOOD_RPC_READ_RETRIES: ${HOOD_RPC_READ_RETRIES:-1}
+      HOOD_RPC_TIMEOUT_MS: ${HOOD_RPC_TIMEOUT_MS:-8000}
+
+      HUB_LAUNCH_FACTORY: ${HUB_LAUNCH_FACTORY:-}
+      HUB_LAUNCH_FACTORY_BLOCK: ${HUB_LAUNCH_FACTORY_BLOCK:-}
+
+    volumes:
+      - trading-shadow-data:/app/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+
 volumes:
   trading-hub-data:
+  trading-shadow-data:
