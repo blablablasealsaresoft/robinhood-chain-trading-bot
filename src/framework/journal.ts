@@ -27,10 +27,11 @@ export interface WalletActivityRecord {
 
 
 export interface AgentStateRecord {
-  version:1; agentId:string; strategyId:string; mode:'paper'; updatedAt:number
+  version:1; agentId:string; strategyId:string; mode:'paper'|'live'; updatedAt:number
   lastTradeId?:number; stateScope?:string
   spentDay:number; spentTodayUsd:number; lastTradeAt:number|null; realizedUsd:number
   ticks:number; trades:number; refusals:number; lastTickAt:number|null
+  pendingLive?:{phase:'prepared'|'submitted';nonce:number;hash?:string;at:number}
   positions:Array<{
     token:string; tokenSymbol:string; amount:string; costBasis:string; investedUsd:number
     quoteToken:string; quoteSymbol:string; openedAt:number; markUsd:number|null; meta:Record<string,unknown>
@@ -208,14 +209,16 @@ export class Journal {
     return rows.reduce((sum, r) => sum + Number(BigInt(r.amount_in)) / 1e6, 0)
   }
 
-  paperSpentSince(sinceMs:number):number {
-    const rows=this.db.prepare("SELECT meta FROM trades WHERE mode='paper' AND side='buy' AND ts>=?").all(sinceMs) as {meta:string}[]
+  modeSpentSince(mode:'paper'|'live',sinceMs:number):number {
+    const rows=this.db.prepare("SELECT meta FROM trades WHERE mode=? AND side='buy' AND ts>=?").all(mode,sinceMs) as {meta:string}[]
     return rows.reduce((sum,row)=>{
       const value=JSON.parse(row.meta).notionalUsd
-      if(typeof value!=='number'||!Number.isFinite(value)||value<0)throw new Error('Paper spend history requires reconciliation: missing notional')
+      if(typeof value!=='number'||!Number.isFinite(value)||value<0)throw new Error(mode+' spend history requires reconciliation: missing notional')
       return sum+value
     },0)
   }
+  paperSpentSince(sinceMs:number):number { return this.modeSpentSince('paper',sinceMs) }
+  liveSpentSince(sinceMs:number):number { return this.modeSpentSince('live',sinceMs) }
 
   latestTradeId(agentId:string,mode:'paper'|'live'):number {
     return (this.db.prepare('SELECT COALESCE(MAX(id),0) AS id FROM trades WHERE agent_id=? AND mode=?').get(agentId,mode) as {id:number}).id
