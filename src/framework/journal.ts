@@ -374,8 +374,8 @@ export class Journal {
     const keyExpr="'external:' || id"
     const atExpr="CAST(json_extract(payload,'$.at') AS INTEGER)"
     const cursor=before?' AND ('+atExpr+' < ? OR ('+atExpr+' = ? AND '+keyExpr+' < ?))':''
-    const sql='SELECT payload,'+atExpr+' AS at,'+keyExpr+' AS page_key FROM external_events WHERE lower(json_extract(payload,\'$.owner\'))=?'+cursor+' ORDER BY at DESC,page_key DESC LIMIT ?'
-    const rows=this.db.prepare(sql).all(account,...(before?[before.at,before.at,before.key]:[]),bounded) as {payload:string;at:number;page_key:string}[]
+    const sql='SELECT payload,'+atExpr+' AS at,'+keyExpr+' AS page_key FROM external_events WHERE lower(json_extract(payload,\'$.owner\'))=? AND NOT EXISTS (SELECT 1 FROM wallet_activity wa WHERE lower(json_extract(wa.payload,\'$.account\'))=? AND lower(wa.tx_hash)=lower(external_events.tx_hash))'+cursor+' ORDER BY at DESC,page_key DESC LIMIT ?'
+    const rows=this.db.prepare(sql).all(account,account,...(before?[before.at,before.at,before.key]:[]),bounded) as {payload:string;at:number;page_key:string}[]
     return rows.map(row=>({value:JSON.parse(row.payload),at:Number(row.at),pageKey:row.page_key}))
   }
 
