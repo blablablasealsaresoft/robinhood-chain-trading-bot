@@ -27,7 +27,7 @@ COPY --from=build --chown=hood:hood /app/package.json ./package.json
 COPY --from=build --chown=hood:hood /app/node_modules ./node_modules
 COPY --from=build --chown=hood:hood /app/dist ./dist
 
-RUN mkdir -p /app/data && chown -R hood:hood /app
+RUN mkdir -p /app/data && chown hood:hood /app/data
 USER hood
 
 EXPOSE 4670

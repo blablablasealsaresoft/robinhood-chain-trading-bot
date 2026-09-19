@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { backupJournal, inspectJournal, readBackupManifest, restoreJournal } from './ops/journal-backup.js'
 
 function arg(name:string):string|undefined {
