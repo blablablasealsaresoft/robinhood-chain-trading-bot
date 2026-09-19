@@ -101,9 +101,9 @@ async function stop(reason:string){
  try{await Promise.all([handle.stopObservations(),arbitrage.stop()])}catch(error){writeEvent('monitor-stop-error',{message:error instanceof Error?error.message:String(error)})}
  const report=summary()
  writeFileSync(join(output,'shadow-summary.json'),JSON.stringify(report,null,2))
- // Keep an immutable copy name for artifact consumers in addition to the live DB.
- try{copyFileSync(dbPath,join(output,'shadow-journal.sqlite'))}catch{}
  fleet.close()
+ // WAL is checkpointed/closed before the artifact copy so committed rows cannot be stranded in -wal.
+ try{copyFileSync(dbPath,join(output,'shadow-journal.sqlite'))}catch{}
  console.log(JSON.stringify({shadow:'complete',reason,output,agents:report.agents.map(a=>({id:a.id,trades:a.trades,refusals:a.refusals,equityUsd:a.equityUsd})),monitors:report.monitors},null,2))
 }
 async function main(){
