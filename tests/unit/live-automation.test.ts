@@ -35,7 +35,7 @@ describe('controlled live automation config',()=>{
 describe('live automation restart reconciliation',()=>{
  it('refuses startup when a live trade exists without matching persisted state',()=>{
   const journal=open.journal=new Journal(':memory:'),kill=open.kill=new KillSwitch('/nonexistent/KILL')
-  journal.recordTrade({agentId:'live-1',mode:'live',ts:100,side:'buy',token:'0x2222222222222222222222222222222222222222',tokenSymbol:'TEST',quoteToken:'0x3333333333333333333333333333333333333333',quoteSymbol:'USDG',amountIn:1n,amountOut:1n,txHash:'0x'+'a'.repeat(64) as `0x${string}`,reason:'test',slippageBps:1,gasEstimate:1n,meta:{notionalUsd:1}})
+  journal.recordTrade({agentId:'live-1',mode:'live',ts:100,side:'buy',token:'0x2222222222222222222222222222222222222222',tokenSymbol:'TEST',quoteToken:'0x3333333333333333333333333333333333333333',quoteSymbol:'USDG',amountIn:1n,amountOut:1n,txHash:('0x'+'a'.repeat(64)) as `0x${string}`,reason:'test',slippageBps:1,gasEstimate:1n,meta:{notionalUsd:1}})
   expect(()=>liveAgent(journal,kill)).toThrow('existing trades require reconciliation')
  })
  it('refuses startup when a submission marker is unresolved',()=>{
@@ -45,7 +45,7 @@ describe('live automation restart reconciliation',()=>{
  })
  it('restores live daily spend from recorded notional metadata',()=>{
   const journal=open.journal=new Journal(':memory:')
-  journal.recordTrade({agentId:'live-1',mode:'live',ts:100,side:'buy',token:'0x2222222222222222222222222222222222222222',tokenSymbol:'TEST',quoteToken:'0x3333333333333333333333333333333333333333',quoteSymbol:'USDG',amountIn:1n,amountOut:1n,txHash:'0x'+'c'.repeat(64) as `0x${string}`,reason:'test',slippageBps:1,gasEstimate:1n,meta:{notionalUsd:7.5}})
+  journal.recordTrade({agentId:'live-1',mode:'live',ts:100,side:'buy',token:'0x2222222222222222222222222222222222222222',tokenSymbol:'TEST',quoteToken:'0x3333333333333333333333333333333333333333',quoteSymbol:'USDG',amountIn:1n,amountOut:1n,txHash:('0x'+'c'.repeat(64)) as `0x${string}`,reason:'test',slippageBps:1,gasEstimate:1n,meta:{notionalUsd:7.5}})
   expect(journal.liveSpentSince(0)).toBe(7.5)
  })
 })
