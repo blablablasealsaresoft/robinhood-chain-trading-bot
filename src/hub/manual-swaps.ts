@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { buildSwapTx, erc20Abi, type SwapQuote } from 'hoodchain'
-import { encodeFunctionData, getAddress, isAddress, zeroAddress, type Address } from 'viem'
+import { encodeFunctionData, formatUnits, getAddress, isAddress, zeroAddress, type Address } from 'viem'
 import type { Market } from '../framework/market.js'
 import type { Journal } from '../framework/journal.js'
 import { AssetRegistry, type ReviewedTradeAsset } from './assets.js'
@@ -17,6 +17,8 @@ export interface ManualSwapOptions {
 type QuoteEntry = { response: HubQuote; quote: SwapQuote }
 const UINT256_MAX = (1n << 256n) - 1n
 const QUOTE_TTL = 30_000
+const STOCK_REFERENCE_MAX_AGE_SECONDS = 72 * 60 * 60
+const STOCK_MAX_DEVIATION_BPS = 1500
 export class ManualSwapService {
   readonly registry: AssetRegistry
   private readonly quotes = new Map<string, QuoteEntry>()
@@ -49,7 +51,17 @@ export class ManualSwapService {
     const account = address(input.account, 'account')
     const tokenIn = this.registry.get(address(input.tokenIn, 'tokenIn'))
     const tokenOut = this.registry.get(address(input.tokenOut, 'tokenOut'))
-    if (!tokenIn?.tradable || !tokenOut?.tradable) throw new HubError(403, 'ASSET_NOT_ENABLED', 'This asset is not in the manual trading allowlist. Stock acquisition requires a wallet-specific eligibility integration.')
+    if (!tokenIn || !tokenOut) throw new HubError(403, 'ASSET_NOT_ENABLED', 'This asset is not available for manual trading.')
+    const stockIn=tokenIn.type==='stock-token',stockOut=tokenOut.type==='stock-token'
+    if ((!stockIn && !tokenIn.tradable) || (!stockOut && !tokenOut.tradable)) throw new HubError(403, 'ASSET_NOT_ENABLED', 'This asset is not in the manual trading allowlist.')
+    if(stockIn&&stockOut)throw new HubError(422,'STOCK_PAIR_UNSUPPORTED','Stock Token to Stock Token swaps are not enabled.')
+    if(stockOut&&!this.market.client.acknowledgeStockTokenEligibility)throw new HubError(403,'STOCK_ELIGIBILITY_REQUIRED','Stock Token acquisition requires the configured eligibility acknowledgement.')
+    if(stockIn||stockOut){
+      if(this.options.chainId!==4663)throw new HubError(422,'STOCK_NETWORK','Stock Token manual trading is enabled only on Robinhood Chain mainnet.')
+      const quoteAsset=stockIn?tokenOut:tokenIn
+      if(quoteAsset.address.toLowerCase()!==this.market.usdg.toLowerCase()&&quoteAsset.address.toLowerCase()!==this.market.weth.toLowerCase())
+        throw new HubError(422,'STOCK_QUOTE_ASSET','Stock Token manual trades must use USDG or WETH as the other asset.')
+    }
     if (tokenIn.id === tokenOut.id) throw new HubError(400, 'SAME_ASSET', 'Choose two different assets.')
     if (typeof input.amountIn !== 'string' || !/^[1-9]\d{0,77}$/.test(input.amountIn) || BigInt(input.amountIn) > UINT256_MAX) throw new HubError(400, 'INVALID_AMOUNT', 'amountIn must be a positive uint256 base-unit string.')
     const rawSlippage = input.slippageBps ?? String(Math.min(50, this.options.maxSlippageBps))
@@ -58,11 +70,41 @@ export class ManualSwapService {
     if (slippageBps > this.options.maxSlippageBps) throw new HubError(400, 'SLIPPAGE_CAP', 'Slippage exceeds the configured ' + this.options.maxSlippageBps + ' bps cap.')
     await this.network()
     await Promise.all([this.verifyReviewedAsset(tokenIn),this.verifyReviewedAsset(tokenOut)])
+    let stockReference:Awaited<ReturnType<Market['stockChainlinkPrice']>>=null
+    if(stockIn||stockOut){
+      const stock=stockIn?tokenIn:tokenOut
+      stockReference=await this.market.stockChainlinkPrice(stock.symbol,STOCK_REFERENCE_MAX_AGE_SECONDS)
+      if(!stockReference||!Number.isFinite(stockReference.priceUsd)||stockReference.priceUsd<=0)throw new HubError(422,'STOCK_REFERENCE_UNAVAILABLE','A fresh Stock Token reference price is unavailable.')
+    }
     this.guard()
     const quote = await this.market.quoteBuy(tokenIn.address, tokenOut.address, BigInt(input.amountIn))
     this.guard()
     if (!quote || quote.amountOut <= 0n) throw new HubError(422, 'NO_ROUTE', 'No liquid route is available for this pair and amount.')
     if (quote.amountIn !== BigInt(input.amountIn) || quote.route.path[0]?.toLowerCase() !== tokenIn.address.toLowerCase() || quote.route.path.at(-1)?.toLowerCase() !== tokenOut.address.toLowerCase()) throw new HubError(503, 'INVALID_PROVIDER_QUOTE', 'The provider returned an inconsistent quote.')
+    let stockSafety:HubQuote['stockSafety']
+    if(stockReference){
+      const stock=stockIn?tokenIn:tokenOut
+      const quoteAsset=stockIn?tokenOut:tokenIn
+      const stockTokens=stockIn?Number(formatUnits(quote.amountIn,stock.decimals)):Number(formatUnits(quote.amountOut,stock.decimals))
+      let quoteUsd:number|null=null
+      if(quoteAsset.address.toLowerCase()===this.market.usdg.toLowerCase()){
+        const raw=stockIn?quote.amountOut:quote.amountIn
+        quoteUsd=Number(formatUnits(raw,this.market.usdgDecimals))
+      }else{
+        const eth=await this.market.ethUsd(30_000,this.clock())
+        if(eth!==null){
+          const raw=stockIn?quote.amountOut:quote.amountIn
+          quoteUsd=Number(formatUnits(raw,18))*eth
+        }
+      }
+      if(!quoteUsd||!Number.isFinite(quoteUsd)||quoteUsd<=0||!Number.isFinite(stockTokens)||stockTokens<=0)
+        throw new HubError(422,'STOCK_EXECUTION_UNVERIFIED','The Stock Token execution price could not be verified.')
+      const executionPriceUsd=quoteUsd/stockTokens
+      const deviationBps=Math.round(Math.abs(executionPriceUsd/stockReference.priceUsd-1)*10000)
+      if(!Number.isFinite(deviationBps)||deviationBps>STOCK_MAX_DEVIATION_BPS)
+        throw new HubError(422,'STOCK_PRICE_DEVIATION','The DEX execution price differs too far from the Stock Token reference price.')
+      stockSafety={symbol:stock.symbol,referencePriceUsd:stockReference.priceUsd,referenceUpdatedAt:stockReference.updatedAt*1000,executionPriceUsd,deviationBps,maxDeviationBps:STOCK_MAX_DEVIATION_BPS,maxReferenceAgeSeconds:STOCK_REFERENCE_MAX_AGE_SECONDS,acquisitionEligibilityRequired:stockOut}
+    }
     const minimum = quote.amountOut * BigInt(10000 - slippageBps) / 10000n
     if (minimum === 0n) throw new HubError(422, 'AMOUNT_TOO_SMALL', 'The quoted output is too small to enforce a positive minimum.')
     let estimatedNetworkFeeWei: string | null = null
@@ -75,7 +117,7 @@ export class ManualSwapService {
       quoteId: randomUUID(), chainId: this.options.chainId, account, tokenIn, tokenOut,
       amountIn: quote.amountIn.toString(), amountOut: quote.amountOut.toString(), minimumReceived: minimum.toString(),
       slippageBps, gasEstimate: quote.gasEstimate.toString(), estimatedNetworkFeeWei, priceImpactBps: null,
-      source: 'hoodchain/uniswap-v3', route: { path: [...quote.route.path], fees: [...quote.route.fees] }, createdAt: now, expiresAt: now + QUOTE_TTL,
+      source: 'hoodchain/uniswap-v3', route: { path: [...quote.route.path], fees: [...quote.route.fees] }, createdAt: now, expiresAt: now + QUOTE_TTL, ...(stockSafety?{stockSafety}:{}),
     }
     this.quotes.set(response.quoteId, { response, quote })
     return structuredClone(response)
