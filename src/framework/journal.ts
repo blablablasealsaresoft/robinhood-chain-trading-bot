@@ -94,6 +94,20 @@ export class Journal {
         observed_at INTEGER NOT NULL, priced_value_usd REAL NOT NULL, incomplete INTEGER NOT NULL,
         PRIMARY KEY(chain_id, account, block_number)
       );
+
+      CREATE TABLE IF NOT EXISTS market_samples (
+        chain_id INTEGER NOT NULL,
+        asset_key TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        price_usd REAL,
+        reference_usd REAL,
+        dex_usd REAL,
+        spread_bps REAL,
+        source TEXT NOT NULL,
+        PRIMARY KEY(chain_id, asset_key, observed_at)
+      );
+      CREATE INDEX IF NOT EXISTS idx_market_samples_asset_time
+        ON market_samples(chain_id, asset_key, observed_at);
       CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_account_time
         ON portfolio_snapshots(chain_id, account, observed_at);
 
@@ -329,6 +343,24 @@ export class Journal {
     return rows.map(row=>({value:JSON.parse(row.payload),at:Number(row.at),pageKey:row.page_key}))
   }
 
+
+  recordMarketSample(sample:{chainId:number;assetKey:string;observedAt:number;priceUsd:number|null;referenceUsd:number|null;dexUsd:number|null;spreadBps:number|null;source:string}):void {
+    if(!Number.isSafeInteger(sample.observedAt)||sample.observedAt<0)throw new Error('Invalid market sample timestamp')
+    for(const value of [sample.priceUsd,sample.referenceUsd,sample.dexUsd,sample.spreadBps])if(value!==null&&!Number.isFinite(value))throw new Error('Invalid market sample value')
+    this.db.prepare(`INSERT OR REPLACE INTO market_samples
+      (chain_id,asset_key,observed_at,price_usd,reference_usd,dex_usd,spread_bps,source)
+      VALUES (?,?,?,?,?,?,?,?)`).run(sample.chainId,sample.assetKey.toLowerCase(),sample.observedAt,sample.priceUsd,sample.referenceUsd,sample.dexUsd,sample.spreadBps,sample.source)
+    this.db.prepare('DELETE FROM market_samples WHERE observed_at<?').run(sample.observedAt-30*86400000)
+    this.db.prepare('DELETE FROM market_samples WHERE rowid IN (SELECT rowid FROM market_samples WHERE chain_id=? AND asset_key=? ORDER BY observed_at DESC LIMIT -1 OFFSET 10000)')
+      .run(sample.chainId,sample.assetKey.toLowerCase())
+  }
+  marketSeries(chainId:number,assetKey:string,sinceMs:number,limit=720):Array<{observedAt:number;priceUsd:number|null;referenceUsd:number|null;dexUsd:number|null;spreadBps:number|null;source:string}> {
+    const bounded=Math.max(2,Math.min(2000,Math.trunc(limit)))
+    const rows=this.db.prepare(`SELECT observed_at,price_usd,reference_usd,dex_usd,spread_bps,source
+      FROM market_samples WHERE chain_id=? AND asset_key=? AND observed_at>=?
+      ORDER BY observed_at DESC LIMIT ?`).all(chainId,assetKey.toLowerCase(),sinceMs,bounded) as Array<Record<string,unknown>>
+    return rows.reverse().map(row=>({observedAt:Number(row.observed_at),priceUsd:row.price_usd===null?null:Number(row.price_usd),referenceUsd:row.reference_usd===null?null:Number(row.reference_usd),dexUsd:row.dex_usd===null?null:Number(row.dex_usd),spreadBps:row.spread_bps===null?null:Number(row.spread_bps),source:String(row.source)}))
+  }
 
   recordPortfolioSnapshot(snapshot:PortfolioSnapshotRecord):void {
     const account=snapshot.account.toLowerCase()
