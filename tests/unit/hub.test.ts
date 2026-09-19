@@ -158,7 +158,7 @@ describe('HTTP adapter', () => {
     const f = await server()
     const status = await fetch(f.base + '/api/status')
     expect(status.headers.get('cache-control')).toBe('no-store')
-    expect(await status.json()).toMatchObject({ capabilities: { manualBroadcast: false, stockTrading: false } })
+    expect(await status.json()).toMatchObject({ capabilities: { manualBroadcast: false, stockTrading: true, stockAcquisition: false } })
     const q = await fetch(f.base + '/api/quote?' + new URLSearchParams(f.params)).then(r => r.json())
     const r = await fetch(f.base + '/api/swap', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ quoteId: q.quoteId, account }) })
     expect(r.status).toBe(200); expect(await r.json()).toMatchObject({ kind: 'wallet-transaction-plan', signing: 'user-wallet' })
