@@ -116,10 +116,10 @@ export class HubReadModel {
     }
   }
 
-  async stock(symbol: string, rawAccount:string|null=null) {
+  async stock(symbol: string) {
     const token = this.registry.list().find(a => a.type === 'stock-token' && a.symbol === symbol.toUpperCase())
     if (!token) throw new HubError(404, 'UNKNOWN_STOCK', 'This Stock Token is not in the network registry.')
-    const stockCacheKey=token.symbol+':'+(rawAccount?.toLowerCase()||'public')
+    const stockCacheKey=token.symbol
     const cached = this.stocksCache.get(stockCacheKey)
     if (cached && Date.now()-cached.at < 30_000) return cached.value
     const pending = this.stocksPending.get(stockCacheKey)
@@ -129,14 +129,13 @@ export class HubReadModel {
       const reference = await this.market.stockChainlinkPrice(token.symbol)
       // Reuse Market and preserve its existing eligibility gate on acquisition quotes.
       const dex = reference ? await this.market.stockDexPrice(token.address, reference.priceUsd) : null
-      const compliance=rawAccount&&this.stockCompliance?this.stockCompliance.publicStatus(rawAccount):{configured:!!this.stockCompliance?.configured,eligible:false,expiresAt:null,checks:null}
       const value = { asset: token, referencePriceUsd: reference?.priceUsd ?? null, referenceUpdatedAt: reference ? reference.updatedAt * 1000 : null,
         dexPriceUsd: dex, premiumBps: reference && dex !== null ? (dex/reference.priceUsd-1)*10000 : null,
         liquidityUsd: null,
         tradingEnabled: this.registry.chainId===4663 && dex!==null,
-        acquisitionEnabled: this.registry.chainId===4663 && dex!==null && this.market.client.acknowledgeStockTokenEligibility && compliance.eligible,
+        acquisitionEnabled: this.registry.chainId===4663 && dex!==null && this.market.client.acknowledgeStockTokenEligibility && !!this.stockCompliance?.configured,
+        acquisitionRequiresWalletAttestation:true,
         eligibilityAcknowledged: !!this.market.client.acknowledgeStockTokenEligibility,
-        walletCompliance:compliance,
         dexStatus: dex === null ? 'unavailable' : 'quoted',
         observedAt: Date.now(), probeUsdg: '10' }
       this.stocksCache.set(stockCacheKey, { at: Date.now(), value })
