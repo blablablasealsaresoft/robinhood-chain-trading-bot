@@ -50,6 +50,7 @@
     "start": "node dist/main.js",
     "dev": "tsx watch src/main.ts",
     "hub": "tsx src/hub-main.ts",
+    "hub:journal": "tsx src/hub-journal.ts",
     "fleet": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests/unit",
