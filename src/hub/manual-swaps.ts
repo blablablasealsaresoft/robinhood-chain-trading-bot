@@ -137,6 +137,11 @@ export class ManualSwapService {
     const account = address(input.account, 'account')
     if (account !== response.account) throw new HubError(409, 'ACCOUNT_MISMATCH', 'The wallet differs from the quoted account. Request a fresh quote.')
     await this.network()
+    if(response.stockSafety){
+      const current=await this.market.stockChainlinkPrice(response.stockSafety.symbol,response.stockSafety.maxReferenceAgeSeconds)
+      if(!current)throw new HubError(422,'STOCK_REFERENCE_UNAVAILABLE','A fresh Stock Token reference price is no longer available. Request a new quote.')
+    }
+    valid()
     const router = this.market.addresses().router
     const [balance, allowance] = await Promise.all([
       this.market.client.public.readContract({ address: response.tokenIn.address, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
