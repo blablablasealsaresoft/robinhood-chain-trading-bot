@@ -32,6 +32,7 @@ export class StockCompliancePolicy {
   constructor(raw:string|undefined,private readonly fetcher:typeof fetch=fetch,private readonly clock:()=>number=Date.now){
     for(const a of parseAttestations(raw))this.attestations.set(a.account.toLowerCase(),a)
   }
+  get configured(){return this.attestations.size>0}
 
   publicStatus(account:string){
     if(!isAddress(account)||account.toLowerCase()===zeroAddress)return {configured:this.attestations.size>0,eligible:false,expiresAt:null,checks:null}
