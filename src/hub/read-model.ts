@@ -129,7 +129,11 @@ export class HubReadModel {
       const dex = reference ? await this.market.stockDexPrice(token.address, reference.priceUsd) : null
       const value = { asset: token, referencePriceUsd: reference?.priceUsd ?? null, referenceUpdatedAt: reference ? reference.updatedAt * 1000 : null,
         dexPriceUsd: dex, premiumBps: reference && dex !== null ? (dex/reference.priceUsd-1)*10000 : null,
-        liquidityUsd: null, tradingEnabled: false, dexStatus: dex === null ? 'unavailable' : 'quoted',
+        liquidityUsd: null,
+        tradingEnabled: this.registry.chainId===4663 && dex!==null,
+        acquisitionEnabled: this.registry.chainId===4663 && dex!==null && this.market.client.acknowledgeStockTokenEligibility,
+        eligibilityAcknowledged: !!this.market.client.acknowledgeStockTokenEligibility,
+        dexStatus: dex === null ? 'unavailable' : 'quoted',
         observedAt: Date.now(), probeUsdg: '10' }
       this.stocksCache.set(token.symbol, { at: Date.now(), value })
       return value

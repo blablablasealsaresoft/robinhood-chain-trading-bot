@@ -158,7 +158,7 @@ describe('HTTP adapter', () => {
     const f = await server()
     const status = await fetch(f.base + '/api/status')
     expect(status.headers.get('cache-control')).toBe('no-store')
-    expect(await status.json()).toMatchObject({ capabilities: { manualBroadcast: false, stockTrading: false } })
+    expect(await status.json()).toMatchObject({ capabilities: { manualBroadcast: false, stockTrading: true, stockAcquisition: false } })
     const q = await fetch(f.base + '/api/quote?' + new URLSearchParams(f.params)).then(r => r.json())
     const r = await fetch(f.base + '/api/swap', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ quoteId: q.quoteId, account }) })
     expect(r.status).toBe(200); expect(await r.json()).toMatchObject({ kind: 'wallet-transaction-plan', signing: 'user-wallet' })
@@ -177,4 +177,63 @@ describe('HTTP adapter', () => {
     const result = await fetch(f.base + '/api/quote?' + new URLSearchParams(f.params))
     expect(result.status).toBe(503); expect(await result.text()).not.toContain('secret-credential')
   })
+})
+
+
+describe('manual Stock Token trading boundary',()=>{
+ function stockFixture(eligible:boolean){
+  const market=new Market({...config,stockTokenEligible:eligible})
+  vi.spyOn(market.client.public,'getChainId').mockResolvedValue(4663)
+  vi.spyOn(market.client.public,'getGasPrice').mockResolvedValue(1_000_000_000n)
+  vi.spyOn(market.client.public,'estimateGas').mockResolvedValue(150000n)
+  vi.spyOn(market.client.public,'readContract').mockImplementation(async({functionName}:any)=>functionName==='balanceOf'?10n**30n:functionName==='allowance'?10n**30n:functionName==='decimals'?18:0n)
+  const journal={recordDecision:vi.fn(()=>1),recordWalletPlan:vi.fn()}
+  const service=new ManualSwapService(market,{chainId:4663,maxSlippageBps:100,isKilled:()=>false,journal})
+  const stock=service.registry.list().find(x=>x.type==='stock-token')!
+  vi.spyOn(market,'stockChainlinkPrice').mockResolvedValue({symbol:stock.symbol,address:stock.address,feed:another,priceUsd:100,answer:10000000000n,answerDecimals:8,roundId:1n,updatedAt:Math.floor(Date.now()/1000),ageSeconds:1})
+  vi.spyOn(market,'ethUsd').mockResolvedValue(2500)
+  return {market,service,stock,journal}
+ }
+
+ it('blocks Stock Token acquisition without eligibility while allowing disposal',async()=>{
+  const f=stockFixture(false)
+  await expect(f.service.quote({chainId:'4663',tokenIn:f.market.usdg,tokenOut:f.stock.address,amountIn:'100000000',account,slippageBps:'50'})).rejects.toMatchObject({code:'STOCK_ELIGIBILITY_REQUIRED'})
+  expect(f.market.stockChainlinkPrice).not.toHaveBeenCalled()
+
+  vi.spyOn(f.market,'quoteBuy').mockResolvedValue({amountIn:10n**18n,amountOut:100000000n,gasEstimate:150000n,route:{path:[f.stock.address,f.market.usdg],fees:[3000],encodedPath:encodePacked(['address','uint24','address'],[f.stock.address,3000,f.market.usdg])}})
+  const sell=await f.service.quote({chainId:'4663',tokenIn:f.stock.address,tokenOut:f.market.usdg,amountIn:(10n**18n).toString(),account,slippageBps:'50'})
+  expect(sell.tokenIn.type).toBe('stock-token')
+  expect(sell.stockSafety).toMatchObject({symbol:f.stock.symbol,referencePriceUsd:100,executionPriceUsd:100,deviationBps:0,acquisitionEligibilityRequired:false})
+ })
+
+ it('quotes eligible USDG acquisition only when DEX execution stays near the fresh reference',async()=>{
+  const f=stockFixture(true)
+  vi.spyOn(f.market,'quoteBuy').mockResolvedValue({amountIn:100000000n,amountOut:10n**18n,gasEstimate:150000n,route:{path:[f.market.usdg,f.stock.address],fees:[3000],encodedPath:encodePacked(['address','uint24','address'],[f.market.usdg,3000,f.stock.address])}})
+  const q=await f.service.quote({chainId:'4663',tokenIn:f.market.usdg,tokenOut:f.stock.address,amountIn:'100000000',account,slippageBps:'50'})
+  expect(q.stockSafety).toMatchObject({symbol:f.stock.symbol,referencePriceUsd:100,executionPriceUsd:100,deviationBps:0,maxDeviationBps:1500,maxReferenceAgeSeconds:259200,acquisitionEligibilityRequired:true})
+  expect(q.tokenOut.type).toBe('stock-token')
+ })
+
+ it('rejects unavailable references and excessive DEX/reference deviation',async()=>{
+  const stale=stockFixture(true)
+  vi.mocked(stale.market.stockChainlinkPrice).mockResolvedValueOnce(null)
+  await expect(stale.service.quote({chainId:'4663',tokenIn:stale.market.usdg,tokenOut:stale.stock.address,amountIn:'100000000',account,slippageBps:'50'})).rejects.toMatchObject({code:'STOCK_REFERENCE_UNAVAILABLE'})
+
+  const deviated=stockFixture(true)
+  vi.spyOn(deviated.market,'quoteBuy').mockResolvedValue({amountIn:100000000n,amountOut:5n*10n**17n,gasEstimate:150000n,route:{path:[deviated.market.usdg,deviated.stock.address],fees:[3000],encodedPath:encodePacked(['address','uint24','address'],[deviated.market.usdg,3000,deviated.stock.address])}})
+  await expect(deviated.service.quote({chainId:'4663',tokenIn:deviated.market.usdg,tokenOut:deviated.stock.address,amountIn:'100000000',account,slippageBps:'50'})).rejects.toMatchObject({code:'STOCK_PRICE_DEVIATION'})
+ })
+
+ it('restricts Stock Token trades to USDG/WETH counterparties and rechecks reference before prepare',async()=>{
+  const f=stockFixture(true)
+  vi.spyOn(f.market,'quoteBuy').mockResolvedValue({amountIn:100000000n,amountOut:10n**18n,gasEstimate:150000n,route:{path:[f.market.usdg,f.stock.address],fees:[3000],encodedPath:encodePacked(['address','uint24','address'],[f.market.usdg,3000,f.stock.address])}})
+  const q=await f.service.quote({chainId:'4663',tokenIn:f.market.usdg,tokenOut:f.stock.address,amountIn:'100000000',account,slippageBps:'50'})
+  vi.mocked(f.market.stockChainlinkPrice).mockResolvedValueOnce(null)
+  await expect(f.service.prepare({quoteId:q.quoteId,account})).rejects.toMatchObject({code:'STOCK_REFERENCE_UNAVAILABLE'})
+
+  const reviewed=getAddress('0x5555555555555555555555555555555555555555')
+  const service=new ManualSwapService(f.market,{chainId:4663,maxSlippageBps:100,isKilled:()=>false,journal:f.journal,reviewedAssets:[{address:reviewed,symbol:'ALT',name:'Alt',decimals:18,type:'crypto'}]})
+  const stock=service.registry.list().find(x=>x.type==='stock-token')!
+  await expect(service.quote({chainId:'4663',tokenIn:reviewed,tokenOut:stock.address,amountIn:'1000000000000000000',account,slippageBps:'50'})).rejects.toMatchObject({code:'STOCK_QUOTE_ASSET'})
+ })
 })
