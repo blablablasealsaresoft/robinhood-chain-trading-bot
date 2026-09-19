@@ -6,6 +6,7 @@ import { Market } from '../../src/framework/market.js'
 import type { FleetConfig } from '../../src/framework/config.js'
 import type { Fleet } from '../../src/framework/fleet.js'
 import { ManualSwapService } from '../../src/hub/manual-swaps.js'
+import { StockCompliancePolicy } from '../../src/hub/stock-compliance.js'
 import { createHubHandler } from '../../src/server/hub.js'
 
 const account = getAddress('0x1111111111111111111111111111111111111111')
@@ -184,16 +185,26 @@ describe('HTTP adapter', () => {
 describe('manual Stock Token trading boundary',()=>{
  function stockFixture(eligible:boolean){
   const market=new Market({...config,stockTokenEligible:eligible})
+  const canonical=market.pricedStockTokens()[0]!
+  const now=Date.now()
+  const attestation=JSON.stringify([{account,nonUsPerson:true,jurisdictionEligible:true,appropriatenessPassed:true,riskDisclosuresAccepted:true,taxCertificationComplete:true,verifiedAt:now-1000,expiresAt:now+86400000}])
+  const fakeFetch=vi.fn(async(url:string|URL)=>{
+   const body=String(url).includes('/assets')
+    ?{assets:[{tokenSymbol:canonical.symbol,status:'ASSET_STATUS_ACTIVE',deployments:[{chainId:4663,contractAddress:canonical.address}],tradingCapabilities:{fractionalTradability:'tradable',allDayTradability:'tradable',extendedHoursFractionalTradability:true}}]}
+    :{quotes:[{tokenSymbol:canonical.symbol,deployments:[{chainId:4663,contractAddress:canonical.address}],isTradingHalt:false,generatedAt:new Date(now).toISOString()}]}
+   return new Response(JSON.stringify(body),{headers:{'content-type':'application/json'}})
+  }) as unknown as typeof fetch
+  const stockCompliance=new StockCompliancePolicy(eligible?attestation:undefined,fakeFetch,()=>now)
   vi.spyOn(market.client.public,'getChainId').mockResolvedValue(4663)
   vi.spyOn(market.client.public,'getGasPrice').mockResolvedValue(1_000_000_000n)
   vi.spyOn(market.client.public,'estimateGas').mockResolvedValue(150000n)
   vi.spyOn(market.client.public,'readContract').mockImplementation(async({functionName}:any)=>functionName==='balanceOf'?10n**30n:functionName==='allowance'?10n**30n:functionName==='decimals'?18:0n)
   const journal={recordDecision:vi.fn(()=>1),recordWalletPlan:vi.fn()}
-  const service=new ManualSwapService(market,{chainId:4663,maxSlippageBps:100,isKilled:()=>false,journal})
+  const service=new ManualSwapService(market,{chainId:4663,maxSlippageBps:100,isKilled:()=>false,journal,stockCompliance})
   const stock=service.registry.list().find(x=>x.type==='stock-token')!
-  vi.spyOn(market,'stockChainlinkPrice').mockResolvedValue({symbol:stock.symbol,address:stock.address,feed:another,priceUsd:100,answer:10000000000n,answerDecimals:8,roundId:1n,updatedAt:Math.floor(Date.now()/1000),ageSeconds:1})
+  vi.spyOn(market,'stockChainlinkPrice').mockResolvedValue({symbol:stock.symbol,address:stock.address,feed:another,priceUsd:100,answer:10000000000n,answerDecimals:8,roundId:1n,updatedAt:Math.floor(now/1000),ageSeconds:1})
   vi.spyOn(market,'ethUsd').mockResolvedValue(2500)
-  return {market,service,stock,journal}
+  return {market,service,stock,journal,stockCompliance}
  }
 
  it('blocks Stock Token acquisition without eligibility while allowing disposal',async()=>{
@@ -233,7 +244,7 @@ describe('manual Stock Token trading boundary',()=>{
   await expect(f.service.prepare({quoteId:q.quoteId,account})).rejects.toMatchObject({code:'STOCK_REFERENCE_UNAVAILABLE'})
 
   const reviewed=getAddress('0x5555555555555555555555555555555555555555')
-  const service=new ManualSwapService(f.market,{chainId:4663,maxSlippageBps:100,isKilled:()=>false,journal:f.journal,reviewedAssets:[{address:reviewed,symbol:'ALT',name:'Alt',decimals:18,type:'crypto'}]})
+  const service=new ManualSwapService(f.market,{chainId:4663,maxSlippageBps:100,isKilled:()=>false,journal:f.journal,stockCompliance:f.stockCompliance,reviewedAssets:[{address:reviewed,symbol:'ALT',name:'Alt',decimals:18,type:'crypto'}]})
   const stock=service.registry.list().find(x=>x.type==='stock-token')!
   await expect(service.quote({chainId:'4663',tokenIn:reviewed,tokenOut:stock.address,amountIn:'1000000000000000000',account,slippageBps:'50'})).rejects.toMatchObject({code:'STOCK_QUOTE_ASSET'})
  })
