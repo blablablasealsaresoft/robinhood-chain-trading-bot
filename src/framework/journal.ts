@@ -316,6 +316,16 @@ export class Journal {
     return rows.map(row=>JSON.parse(row.payload))
   }
 
+  walletActivityPage(account:string,limit:number,before?:{at:number;key:string}):Array<{value:WalletActivityRecord;at:number;pageKey:string}> {
+    const bounded=Math.max(1,Math.min(101,Math.trunc(limit))),owner=account.toLowerCase()
+    const keyExpr="'wallet:' || chain_id || ':' || lower(tx_hash)"
+    const atExpr="CAST(json_extract(payload,'$.at') AS INTEGER)"
+    const cursor=before?' AND ('+atExpr+' < ? OR ('+atExpr+' = ? AND '+keyExpr+' < ?))':''
+    const sql='SELECT payload,'+atExpr+' AS at,'+keyExpr+' AS page_key FROM wallet_activity WHERE lower(json_extract(payload,\'$.account\'))=?'+cursor+' ORDER BY at DESC,page_key DESC LIMIT ?'
+    const rows=this.db.prepare(sql).all(owner,...(before?[before.at,before.at,before.key]:[]),bounded) as {payload:string;at:number;page_key:string}[]
+    return rows.map(row=>({value:JSON.parse(row.payload),at:Number(row.at),pageKey:row.page_key}))
+  }
+
 
   recordPortfolioSnapshot(snapshot:PortfolioSnapshotRecord):void {
     const account=snapshot.account.toLowerCase()
@@ -357,6 +367,25 @@ export class Journal {
   externalEvents(type:'bridge'|'launch',limit=100,chainId?:number):ExternalEventRecord[] {
     const rows=this.db.prepare('SELECT payload FROM external_events WHERE type=? AND (? IS NULL OR chain_id=?) ORDER BY observed_at DESC LIMIT ?').all(type,chainId??null,chainId??null,Math.min(200,Math.max(1,limit))) as {payload:string}[]
     return rows.map(row=>JSON.parse(row.payload))
+  }
+
+  externalEventsPage(owner:string,limit:number,before?:{at:number;key:string}):Array<{value:ExternalEventRecord;at:number;pageKey:string}> {
+    const bounded=Math.max(1,Math.min(101,Math.trunc(limit))),account=owner.toLowerCase()
+    const keyExpr="'external:' || id"
+    const atExpr="CAST(json_extract(payload,'$.at') AS INTEGER)"
+    const cursor=before?' AND ('+atExpr+' < ? OR ('+atExpr+' = ? AND '+keyExpr+' < ?))':''
+    const sql='SELECT payload,'+atExpr+' AS at,'+keyExpr+' AS page_key FROM external_events WHERE lower(json_extract(payload,\'$.owner\'))=?'+cursor+' ORDER BY at DESC,page_key DESC LIMIT ?'
+    const rows=this.db.prepare(sql).all(account,...(before?[before.at,before.at,before.key]:[]),bounded) as {payload:string;at:number;page_key:string}[]
+    return rows.map(row=>({value:JSON.parse(row.payload),at:Number(row.at),pageKey:row.page_key}))
+  }
+
+  manualDecisionPage(owner:string,limit:number,before?:{at:number;key:string}):Array<{value:DecisionRecord;at:number;pageKey:string}> {
+    const bounded=Math.max(1,Math.min(101,Math.trunc(limit))),account=owner.toLowerCase()
+    const keyExpr="'decision:' || printf('%020d',id)"
+    const cursor=before?' AND (ts < ? OR (ts = ? AND '+keyExpr+' < ?))':''
+    const sql='SELECT *,'+keyExpr+' AS page_key FROM decisions WHERE agent_id=\'hub:manual\' AND lower(json_extract(meta,\'$.owner\'))=?'+cursor+' ORDER BY ts DESC,page_key DESC LIMIT ?'
+    const rows=this.db.prepare(sql).all(account,...(before?[before.at,before.at,before.key]:[]),bounded) as (Record<string,unknown>&{page_key:string})[]
+    return rows.map(r=>({value:{id:r.id as number,agentId:r.agent_id as string,ts:r.ts as number,kind:r.kind as DecisionRecord['kind'],detail:r.detail as string,meta:JSON.parse((r.meta as string)||'{}')},at:r.ts as number,pageKey:r.page_key}))
   }
   dueExternalEvents(type:'bridge'|'launch',now:number,limit=10,sources?:string[]):ExternalEventRecord[] {
     const filter=sources?.length?' AND json_extract(payload, \'$.source\') IN ('+sources.map(()=>'?').join(',')+')':''
