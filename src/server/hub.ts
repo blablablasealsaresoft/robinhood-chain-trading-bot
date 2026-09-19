@@ -87,7 +87,10 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
           const rawLimit=url.searchParams.get('limit')
           const limit=rawLimit===null?50:Number(rawLimit)
           respond(res,200,read.activityPage(account,limit,url.searchParams.get('cursor')))
-        } else respond(res, 200, { events: read.activity(), scope:'operator-global', nextCursor:null })
+        } else {
+          if(operatorToken&&!authorizedControl(req))throw new HubError(403,'OPERATOR_AUTH_REQUIRED','Operator authentication is required for the global Activity feed.')
+          respond(res, 200, { events: read.activity(), scope:'operator-global', nextCursor:null })
+        }
       } else if (path === '/api/risk' && req.method === 'GET') {
         respond(res, 200, { ...fleet.summary(), limits: fleet.config.defaultLimits, stockTradingEnabled: false, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null, onchainExecutorPaused: null })
       } else if (path.startsWith('/api/stocks/') && req.method === 'GET') {
