@@ -23,7 +23,7 @@ function fixture(){
  const market={usdg,usdgDecimals:6,spotPrice:vi.fn(async()=>({token:asset,priceUsd:10,via:'usdg',ts:1})),stockChainlinkPrice:vi.fn(),quoteBuy,quoteSell} as unknown as Market
  const row={id:'asset',chainId:4663,address:asset,symbol:'TEST',name:'Test',decimals:18,type:'crypto',source:'test',tradable:true}
  const registry={chainId:4663,get:(address:string)=>address.toLowerCase()===asset.toLowerCase()?row:undefined,list:()=>[row]} as unknown as AssetRegistry
- return {service:new MarketDepthService(market,registry,()=>123456),quoteBuy,quoteSell}
+ return {service:new MarketDepthService(market,registry,()=>123456),quoteBuy,quoteSell,market}
 }
 describe('MarketDepthService',()=>{
  it('returns executable buy/sell curves with impact and route metadata',async()=>{
@@ -43,7 +43,7 @@ describe('MarketDepthService',()=>{
   const f=fixture()
   const stockRow={id:'stock',chainId:4663,address:asset,symbol:'AAPL',name:'Apple',decimals:18,type:'stock-token',source:'test',tradable:false}
   const registry={chainId:4663,get:()=>stockRow,list:()=>[stockRow]} as unknown as AssetRegistry
-  const market=(f.service as any).market as Market
+  const market=f.market
   vi.mocked(market.stockChainlinkPrice).mockResolvedValue({symbol:'AAPL',address:asset,feed:usdg,priceUsd:10,answer:1n,answerDecimals:8,roundId:1n,updatedAt:1,ageSeconds:1})
   const service=new MarketDepthService(market,registry,()=>123456)
   const result=await service.read(asset)
@@ -54,7 +54,7 @@ describe('MarketDepthService',()=>{
   const f=fixture()
   await expect(f.service.read('bad')).rejects.toMatchObject({code:'INVALID_ASSET'})
   const unknownRegistry={chainId:4663,get:()=>undefined,list:()=>[]} as unknown as AssetRegistry
-  const market=(f.service as any).market as Market
+  const market=f.market
   await expect(new MarketDepthService(market,unknownRegistry).read(asset)).rejects.toMatchObject({code:'UNKNOWN_ASSET'})
  })
 })
