@@ -99,7 +99,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
           respond(res, 200, { events: read.activity(), scope:'operator-global', nextCursor:null })
         }
       } else if (path === '/api/risk' && req.method === 'GET') {
-        respond(res, 200, { ...fleet.summary(), limits: fleet.config.defaultLimits, stockTradingEnabled: false, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null, onchainExecutorPaused: null })
+        respond(res, 200, { ...fleet.summary(), limits: fleet.config.defaultLimits, stockTradingEnabled: swaps.registry.chainId===4663, stockAcquisitionEnabled: swaps.registry.chainId===4663&&fleet.config.stockTokenEligible, scope: 'primary-fleet-and-owned-monitor', arbitrageMonitorStopped: options.arbitrage ? !options.arbitrage.status().running : null, onchainExecutorPaused: null })
       } else if (path.startsWith('/api/stocks/') && req.method === 'GET') {
         respond(res, 200, await read.stock(decodeURIComponent(path.split('/')[3]!)))
       } else if (path.startsWith('/api/strategies') && req.method === 'GET') {
