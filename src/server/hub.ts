@@ -55,7 +55,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     return secretEqual(auth.slice(7),operatorToken)
   }
   const handle=async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|forever(?:\/prepare)?|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
+    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
     try {
       const origin = req.headers.origin
       if (origin && new URL(origin).host !== req.headers.host) throw new HubError(403, 'ORIGIN_NOT_ALLOWED', 'Use the configured same-origin Hub API proxy.')
@@ -100,6 +100,11 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         respond(res,200,await launchpad.prepare(await readBody(req)))
       } else if(path === '/api/forever' && req.method === 'GET') {
         respond(res,200,await forever.status())
+      } else if(path === '/api/forever/vaults' && req.method === 'GET') {
+        const allowed=new Set(['account'])
+        for(const key of url.searchParams.keys())if(!allowed.has(key))throw new HubError(400,'UNEXPECTED_PARAMETER','Forever vault snapshot does not accept this parameter.')
+        if(url.searchParams.getAll('account').length>1)throw new HubError(400,'DUPLICATE_PARAMETER','account must not be repeated.')
+        respond(res,200,await forever.list(url.searchParams.get('account')))
       } else if(path === '/api/forever/prepare' && req.method === 'POST') {
         respond(res,200,await forever.prepare(await readBody(req)))
       } else if (path === '/api/launches' && req.method === 'GET') {
