@@ -148,7 +148,7 @@ describe('manual Hub adapter', () => {
 describe('HTTP adapter', () => {
   async function server() {
     const f = fixture()
-    const fleet = { config, summary: () => ({ mode: 'paper', killed: false }) } as Fleet
+    const fleet = { config, summary: () => ({ mode: 'paper', killed: false }), kill: { isKilled: () => false } } as Fleet
     const handler = createHubHandler(fleet, f.service)
     const server = createServer(async (req, res) => { if (!await handler(req, res, new URL(req.url!, 'http://localhost'))) { res.writeHead(404); res.end() } })
     servers.push(server)
@@ -173,6 +173,12 @@ describe('HTTP adapter', () => {
     expect((await fetch(f.base + '/api/swap', { method: 'POST', body: '{}' })).status).toBe(415)
     for (const body of ['{', '[]', 'null']) expect((await fetch(f.base + '/api/swap', { method: 'POST', headers: { 'content-type': 'application/json' }, body })).status).toBe(400)
     expect((await fetch(f.base + '/api/swap', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: 'x'.repeat(5000) }) })).status).toBe(413)
+  })
+  it('exposes unsigned Forever status through the path allowlist when no factory is configured', async () => {
+    const f = await server()
+    const result = await fetch(f.base + '/api/forever')
+    expect(result.status).toBe(200)
+    expect(await result.json()).toMatchObject({ configured: false, status: 'not-configured', factory: null })
   })
   it('does not leak RPC credentials or raw exception details', async () => {
     const f = await server(); vi.mocked(f.market.client.public.getChainId).mockRejectedValue(new Error('private RPC secret-credential'))
