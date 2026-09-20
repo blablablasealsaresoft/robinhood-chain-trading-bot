@@ -175,6 +175,7 @@ export function createReliableRpc(options:ReliableRpcOptions):{
         })
         endpoint.latencyMs=Date.now()-started
         if(response.status===429||response.status>=500)throw new RpcTransportError('RPC HTTP '+response.status,true)
+        if(response.status===400&&READ_METHODS.has(args.method))throw new RpcTransportError('RPC HTTP 400',true)
         if(!response.ok)throw new RpcTransportError('RPC HTTP '+response.status,false)
         const contentType=response.headers.get('content-type')||''
         if(!/json/i.test(contentType))throw new RpcTransportError('RPC response was not JSON',true)

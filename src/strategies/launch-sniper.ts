@@ -1,4 +1,5 @@
-import { erc20Abi, watchLaunches, type Launch } from 'hoodchain'
+import { erc20Abi, type Launch } from 'hoodchain'
+import { watchLaunchesReliable } from '../framework/launches.js'
 import { formatUnits, parseEther, type Address } from 'viem'
 import type {
   Strategy,
@@ -90,7 +91,7 @@ export class LaunchSniper implements Strategy {
 
   start(ctx: StrategyStartContext): void {
     // Real-time launch subscription across NOXA + The Odyssey.
-    this.unwatch = watchLaunches(
+    this.unwatch = watchLaunchesReliable(
       ctx.market.client,
       (launch) => {
         const key = launch.token.toLowerCase()
