@@ -1,5 +1,6 @@
 import { hubHealth } from '../hub/health.js'
 import { LaunchpadService } from '../hub/launchpad.js'
+import { ForeverService } from '../hub/forever.js'
 import { BridgeObservations } from '../hub/bridge-observations.js'
 import { NativeWrapService } from '../hub/native-wrap.js'
 import { WalletReceipts } from '../hub/wallet-receipts.js'
@@ -39,6 +40,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
   const factory=process.env.HUB_LAUNCH_FACTORY||process.env.HUB_LAUNCH_FACTORY_ADDRESS
   if(process.env.HUB_LAUNCH_FACTORY&&process.env.HUB_LAUNCH_FACTORY_ADDRESS&&process.env.HUB_LAUNCH_FACTORY.toLowerCase()!==process.env.HUB_LAUNCH_FACTORY_ADDRESS.toLowerCase())throw new Error('Conflicting Hub factory configuration')
   const launchpad=new LaunchpadService(market,{chainId:swaps.registry.chainId,factory,deploymentBlock:process.env.HUB_LAUNCH_FACTORY_BLOCK,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal,registry:swaps.registry})
+  const forever=new ForeverService(market,{chainId:swaps.registry.chainId,factory:process.env.HUB_FOREVER_FACTORY,deploymentBlock:process.env.HUB_FOREVER_FACTORY_BLOCK,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal})
   receipts.observeWith(event=>launchpad.observeWallet(event))
   const controlToken = randomUUID()
   const controls = fleet.config.mode === 'paper' && !fleet.config.privateKey
@@ -96,6 +98,10 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         respond(res,200,await launchpad.list(url.searchParams.get('account')))
       } else if(path === '/api/launchpad/prepare' && req.method === 'POST') {
         respond(res,200,await launchpad.prepare(await readBody(req)))
+      } else if(path === '/api/forever' && req.method === 'GET') {
+        respond(res,200,await forever.status())
+      } else if(path === '/api/forever/prepare' && req.method === 'POST') {
+        respond(res,200,await forever.prepare(await readBody(req)))
       } else if (path === '/api/launches' && req.method === 'GET') {
         const [sdkResult,hubResult]=await Promise.allSettled([discovery.recent(),launchpad.recent()])
         if(sdkResult.status==='rejected'&&hubResult.status==='rejected')throw sdkResult.reason

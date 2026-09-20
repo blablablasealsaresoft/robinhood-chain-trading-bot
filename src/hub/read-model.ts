@@ -45,7 +45,7 @@ export class HubReadModel {
 
     const wallets=this.fleet.journal.recentWalletActivity(100).map(event=>({
       id:'wallet:'+event.chainId+':'+event.txHash,at:event.at,type:event.kind,source:'user-wallet',mode:'wallet',
-      title:event.kind.startsWith('launch-')?({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[event.kind]:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':event.kind==='unwrap'?'WETH unwrapped to ETH':'Liquidity added',
+      title:walletActivityTitle(event.kind),
       detail:'Chain '+event.chainId+' · '+event.account+' · '+(event.blockNumber?'Block '+event.blockNumber:'Awaiting receipt'),
       status:event.status,txHash:event.txHash,chainId:event.chainId,owner:event.account,verifiedAt:event.observedAt,
     }))
@@ -78,7 +78,7 @@ export class HubReadModel {
     const candidates:Array<{event:any;at:number;pageKey:string}>=[]
     for(const row of this.fleet.journal.walletActivityPage(account,take,cursor)){
       const event=row.value
-      const title=event.kind.startsWith('launch-')?({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[event.kind]:event.kind==='approval'?'Token approval':event.kind==='swap'?'Wallet swap':event.kind==='wrap'?'ETH wrapped to WETH':event.kind==='unwrap'?'WETH unwrapped to ETH':'Liquidity added'
+      const title=walletActivityTitle(event.kind)
       candidates.push({at:row.at,pageKey:row.pageKey,event:{
         id:'wallet:'+event.chainId+':'+event.txHash,at:event.at,type:event.kind,source:'user-wallet',mode:'wallet',
         title,detail:'Chain '+event.chainId+' · '+event.account+' · '+(event.blockNumber?'Block '+event.blockNumber:'Awaiting receipt'),
@@ -236,6 +236,12 @@ export class HubReadModel {
       walletPnlUsd: null, positions: this.positions(), botSummary: this.fleet.summary(),
       coverage: 'Native ETH and the Hub asset registry only. Held non-stock ERC-20s use bounded live DEX probes when available. Bot positions are separate and are not added to wallet value.' }
   }
+}
+
+function walletActivityTitle(kind:string):string {
+  if(kind.startsWith('launch-'))return ({'launch-create':'Token and sale created','launch-contribute':'Sale contribution','launch-claim':'Sale tokens claimed','launch-refund':'Sale contribution refunded','launch-proceeds':'Creator proceeds withdrawn','launch-remainder':'Remaining sale tokens withdrawn'} as Record<string,string>)[kind]||'Launch action'
+  if(kind.startsWith('forever-'))return ({'forever-create':'Sealed vault created','forever-buy':'Sealed tokens bought','forever-sell':'Sealed tokens sold','forever-depth':'Sealed depth added','forever-rewards':'Buyer rewards claimed','forever-live':'Stream started','forever-end':'Stream ended','forever-tip':'Live stream tipped','forever-stream-claim':'Stream earnings claimed'} as Record<string,string>)[kind]||'Sealed market action'
+  return kind==='approval'?'Token approval':kind==='swap'?'Wallet swap':kind==='wrap'?'ETH wrapped to WETH':kind==='unwrap'?'WETH unwrapped to ETH':'Liquidity added'
 }
 
 function encodeActivityCursor(cursor:{at:number;key:string}):string {
