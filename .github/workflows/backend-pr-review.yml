@@ -2,10 +2,9 @@ name: Verify backend pull requests
 on:
   push:
     branches:
-      - chatgpt/fix-launch-rpc-failover
-      - chatgpt/strategy-lab-sandbox
+      - chatgpt/**
   pull_request:
-    branches: [alpha-integrated-backend]
+    branches: [main, alpha-integrated-backend]
   workflow_dispatch:
 permissions:
   contents: read
