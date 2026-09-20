@@ -80,4 +80,91 @@ describe('ForeverFactory journal prepare',()=>{
     const f=setup()
     await expect(f.service.prepare({chainId:4663,account:owner,action:'sell',vault,token:streamer,amount:'50'})).rejects.toMatchObject({code:'TOKEN_MISMATCH'})
   })
+
+  it('lists a bounded fixed-block snapshot with live hosts and the wallet ended stream',async()=>{
+    const ended=address('6'),foreign=address('7')
+    const metadata='data:application/json;base64,'+Buffer.from(JSON.stringify({description:'Sealed community'})).toString('base64')
+    const f=setup()
+    f.rpc.readContract.mockImplementation(async({functionName,args}:{functionName:string;args?:unknown[]})=>{
+      if(functionName==='vaultCount')return 1n
+      if(functionName==='getVaults')return [vault]
+      if(functionName==='token')return token
+      if(functionName==='creator')return owner
+      if(functionName==='metadataURI')return metadata
+      if(functionName==='realEth')return 3n
+      if(functionName==='tokenReserve')return 900n
+      if(functionName==='rewardPot')return 2n
+      if(functionName==='participants')return 4n
+      if(functionName==='liveCount')return 1n
+      if(functionName==='name')return 'Sealed Cat'
+      if(functionName==='symbol')return 'HCAT'
+      if(functionName==='totalSupply')return 1000n
+      if(functionName==='pendingRewards')return 11n
+      if(functionName==='balanceOf')return 40n
+      if(functionName==='buyVolume')return 5n
+      if(functionName==='sellVolume')return 0n
+      if(functionName==='tradeCount')return 2n
+      if(functionName==='liveStreamers')return streamer
+      if(functionName==='streams'){
+        const who=String(args?.[0]).toLowerCase()
+        if(who===streamer.toLowerCase())return {host:streamer,live:true,startedAt:1700000000n,tipsWei:100n,claimable:95n,claimed:0n,title:'Live booth'}
+        if(who===owner.toLowerCase())return {host:owner,live:false,startedAt:1690000000n,tipsWei:20n,claimable:19n,claimed:1n,title:'Yesterday recap'}
+        if(who===ended.toLowerCase())return {host:ended,live:false,startedAt:1680000000n,tipsWei:8n,claimable:7n,claimed:0n,title:'Hidden ended'}
+        return {host:'0x0000000000000000000000000000000000000000',live:false,startedAt:0n,tipsWei:0n,claimable:0n,claimed:0n,title:''}
+      }
+      if(functionName==='isVault')return true
+      return 0n
+    })
+    const feed=await f.service.list(owner)
+    expect(feed).toMatchObject({chainId:4663,factory,incomplete:false,blockNumber:'101'})
+    expect(feed.vaults).toHaveLength(1)
+    expect(feed.vaults[0]).toMatchObject({vault,token,creator:owner,name:'Sealed Cat',symbol:'HCAT',description:'Sealed community',pendingRewards:'11',tokenBalance:'40',buyVolume:'5'})
+    expect(feed.vaults[0].streams.map((s:{streamer:string;live:boolean;title:string})=>[s.streamer,s.live,s.title])).toEqual([[streamer,true,'Live booth'],[owner,false,'Yesterday recap']])
+    expect(feed.vaults[0].streams.some((s:{streamer:string})=>s.streamer.toLowerCase()===foreign.toLowerCase()||s.streamer.toLowerCase()===ended.toLowerCase())).toBe(false)
+    expect(feed.coverage).toMatch(/ended streams/i)
+    expect(f.rpc.getBlockNumber).toHaveBeenCalled()
+  })
+
+  it('does not invent vaults when the factory page is empty',async()=>{
+    const f=setup()
+    f.rpc.readContract.mockImplementation(async({functionName}:{functionName:string})=>{
+      if(functionName==='vaultCount')return 0n
+      if(functionName==='getVaults')return []
+      throw new Error('unexpected '+functionName)
+    })
+    await expect(f.service.list()).resolves.toMatchObject({vaults:[],incomplete:false,factory})
+  })
+
+  it('marks partial coverage when a vault cannot be read',async()=>{
+    const broken=address('8')
+    const f=setup()
+    f.rpc.readContract.mockImplementation(async({functionName,address}:{functionName:string;address?:string})=>{
+      if(functionName==='vaultCount')return 2n
+      if(functionName==='getVaults')return [vault,broken]
+      if(address===broken)throw new Error('rpc timeout')
+      if(functionName==='token')return token
+      if(functionName==='creator')return owner
+      if(functionName==='metadataURI')return ''
+      if(functionName==='realEth')return 1n
+      if(functionName==='tokenReserve')return 1n
+      if(functionName==='rewardPot')return 0n
+      if(functionName==='participants')return 0n
+      if(functionName==='liveCount')return 0n
+      if(functionName==='name')return 'Ok'
+      if(functionName==='symbol')return 'OK'
+      if(functionName==='totalSupply')return 1000n
+      return 0n
+    })
+    const feed=await f.service.list()
+    expect(feed.incomplete).toBe(true)
+    expect(feed.vaults).toHaveLength(1)
+    expect(feed.coverage).toMatch(/could not be read/)
+  })
+
+  it('refuses an invalid snapshot account and stays disabled without a factory',async()=>{
+    const f=setup()
+    await expect(f.service.list('0x0')).rejects.toMatchObject({code:'INVALID_ADDRESS'})
+    const empty=setup({})
+    await expect(empty.service.list()).rejects.toMatchObject({code:'FOREVER_NOT_CONFIGURED'})
+  })
 })

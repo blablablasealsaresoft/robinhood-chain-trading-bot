@@ -179,6 +179,12 @@ describe('HTTP adapter', () => {
     const result = await fetch(f.base + '/api/forever')
     expect(result.status).toBe(200)
     expect(await result.json()).toMatchObject({ configured: false, status: 'not-configured', factory: null })
+    const vaults = await fetch(f.base + '/api/forever/vaults')
+    expect(vaults.status).toBe(503)
+    expect(await vaults.json()).toMatchObject({ error: { code: 'FOREVER_NOT_CONFIGURED' } })
+    expect((await fetch(f.base + '/api/forever/vaults?limit=1')).status).toBe(400)
+    expect((await fetch(f.base + '/api/forever/vaults?account=' + account + '&account=' + another)).status).toBe(400)
+    expect((await fetch(f.base + '/api/forever/vaults', { method: 'POST' })).status).toBe(405)
   })
   it('does not leak RPC credentials or raw exception details', async () => {
     const f = await server(); vi.mocked(f.market.client.public.getChainId).mockRejectedValue(new Error('private RPC secret-credential'))

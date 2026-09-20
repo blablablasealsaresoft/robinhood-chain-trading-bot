@@ -5,6 +5,29 @@ import type { Journal } from '../framework/journal.js'
 import { HubError } from './manual-swaps.js'
 import { foreverFactoryAbi, foreverTokenAbi, foreverVaultAbi } from './forever-abi.js'
 
+const SNAPSHOT_LIMIT = 100n
+
+function streamRecord(row: unknown): { host: Address; live: boolean; startedAt: bigint; tipsWei: bigint; claimable: bigint; claimed: bigint; title: string } {
+  const raw = Array.isArray(row)
+    ? { host: row[0], live: row[1], startedAt: row[2], tipsWei: row[3], claimable: row[4], claimed: row[5], title: row[6] }
+    : row && typeof row === 'object' ? row as Record<string, unknown> : null
+  const host = raw && (raw.host ?? raw.streamer)
+  if (!raw || typeof host !== 'string' || !isAddress(host) || typeof raw.live !== 'boolean' || typeof raw.startedAt !== 'bigint' || typeof raw.tipsWei !== 'bigint' || typeof raw.claimable !== 'bigint' || typeof raw.claimed !== 'bigint' || typeof raw.title !== 'string') {
+    throw new Error('incomplete stream')
+  }
+  return { host: getAddress(host), live: raw.live, startedAt: raw.startedAt, tipsWei: raw.tipsWei, claimable: raw.claimable, claimed: raw.claimed, title: raw.title }
+}
+
+function descriptionFromUri(uri: string): string {
+  try {
+    if (!uri.startsWith('data:application/json;base64,')) return ''
+    const parsed = JSON.parse(Buffer.from(uri.slice('data:application/json;base64,'.length), 'base64').toString('utf8')) as { description?: unknown }
+    return typeof parsed.description === 'string' && parsed.description.length <= 500 ? parsed.description : ''
+  } catch {
+    return ''
+  }
+}
+
 export type ForeverAction = 'create' | 'buy' | 'sell' | 'addDepth' | 'claimRewards' | 'goLive' | 'endLive' | 'tip' | 'claimStream'
 const kinds = {
   create: 'forever-create',
@@ -75,6 +98,108 @@ export class ForeverService {
       return { ...base, status: 'ready', message: 'Configured ForeverFactory is ready. Each wallet action requires review and confirmation.' }
     } catch {
       return { ...base, status: 'unavailable', message: 'The configured ForeverFactory or RPC is unavailable. Wallet actions are paused.' }
+    }
+  }
+  async list(owner?: string | null) {
+    const wallet = owner ? account(owner) : undefined
+    const factory = await this.checkFactory()
+    const rpc = this.market.client.public
+    const block = await rpc.getBlockNumber()
+    const read = <T>(address: Address, abi: typeof foreverFactoryAbi | typeof foreverVaultAbi | typeof foreverTokenAbi, functionName: string, args: readonly unknown[] = []) =>
+      rpc.readContract({ address, abi, functionName, args, blockNumber: block } as never) as Promise<T>
+    const count = await read<bigint>(factory, foreverFactoryAbi, 'vaultCount')
+    const page = await read<Address[]>(factory, foreverFactoryAbi, 'getVaults', [0n, SNAPSHOT_LIMIT])
+    const vaults: Record<string, unknown>[] = []
+    let unread = 0
+    for (const vault of page) {
+      try { vaults.push(await this.snapshotVault(vault, wallet, read)) }
+      catch { unread++ }
+    }
+    const omitted = count > BigInt(page.length)
+    const incomplete = omitted || unread > 0
+    return {
+      chainId: this.options.chainId,
+      factory,
+      blockNumber: block.toString(),
+      observedAt: Date.now(),
+      incomplete,
+      coverage: omitted
+        ? `First ${page.length} of ${count.toString()} vaults at block ${block.toString()}; not complete history.`
+        : unread
+          ? `Vault snapshot at block ${block.toString()}; ${unread} vault${unread === 1 ? '' : 's'} could not be read.`
+          : `Vault snapshot at block ${block.toString()}; live hosts plus the connected wallet’s ended streams. Not a full tape.`,
+      vaults,
+    }
+  }
+  private async snapshotVault(vault: Address, wallet: Address | undefined, read: <T>(address: Address, abi: typeof foreverFactoryAbi | typeof foreverVaultAbi | typeof foreverTokenAbi, functionName: string, args?: readonly unknown[]) => Promise<T>) {
+    const [token, creator, metadataURI, realEth, tokenReserve, rewardPot, participants, liveCount] = await Promise.all([
+      read<Address>(vault, foreverVaultAbi, 'token'),
+      read<Address>(vault, foreverVaultAbi, 'creator'),
+      read<string>(vault, foreverVaultAbi, 'metadataURI'),
+      read<bigint>(vault, foreverVaultAbi, 'realEth'),
+      read<bigint>(vault, foreverVaultAbi, 'tokenReserve'),
+      read<bigint>(vault, foreverVaultAbi, 'rewardPot'),
+      read<bigint>(vault, foreverVaultAbi, 'participants'),
+      read<bigint>(vault, foreverVaultAbi, 'liveCount'),
+    ])
+    if (!isAddress(token) || token.toLowerCase() === zeroAddress || !isAddress(creator) || creator.toLowerCase() === zeroAddress) throw new Error('incomplete vault')
+    const liveLimit = liveCount > SNAPSHOT_LIMIT ? Number(SNAPSHOT_LIMIT) : Number(liveCount)
+    const [name, symbol, supply, pendingRewards, tokenBalance, buyVolume, sellVolume, tradeCount, ...liveHosts] = await Promise.all([
+      read<string>(token, foreverTokenAbi, 'name'),
+      read<string>(token, foreverTokenAbi, 'symbol'),
+      read<bigint>(token, foreverTokenAbi, 'totalSupply'),
+      wallet ? read<bigint>(vault, foreverVaultAbi, 'pendingRewards', [wallet]) : Promise.resolve(null),
+      wallet ? read<bigint>(token, foreverTokenAbi, 'balanceOf', [wallet]) : Promise.resolve(null),
+      wallet ? read<bigint>(vault, foreverVaultAbi, 'buyVolume', [wallet]) : Promise.resolve(null),
+      wallet ? read<bigint>(vault, foreverVaultAbi, 'sellVolume', [wallet]) : Promise.resolve(null),
+      wallet ? read<bigint>(vault, foreverVaultAbi, 'tradeCount', [wallet]) : Promise.resolve(null),
+      ...Array.from({ length: liveLimit }, (_, i) => read<Address>(vault, foreverVaultAbi, 'liveStreamers', [BigInt(i)])),
+    ])
+    if (typeof name !== 'string' || typeof symbol !== 'string') throw new Error('incomplete vault')
+    const hosts = new Map<string, Address>()
+    for (const host of liveHosts) {
+      if (isAddress(host) && host.toLowerCase() !== zeroAddress) hosts.set(host.toLowerCase(), getAddress(host))
+    }
+    if (wallet && !hosts.has(wallet.toLowerCase())) hosts.set(wallet.toLowerCase(), wallet)
+    const streams = []
+    for (const host of hosts.values()) {
+      const row = streamRecord(await read<unknown>(vault, foreverVaultAbi, 'streams', [host]))
+      const streamer = getAddress(row.host)
+      if (streamer.toLowerCase() === zeroAddress) continue
+      if (!row.live && (!wallet || streamer.toLowerCase() !== wallet.toLowerCase())) continue
+      if (!row.title || new TextEncoder().encode(row.title).length > 80) continue
+      if (!Number.isSafeInteger(Number(row.startedAt) * 1000)) continue
+      streams.push({
+        vault,
+        streamer,
+        title: row.title,
+        live: row.live,
+        startedAt: row.startedAt.toString(),
+        tipsWei: row.tipsWei.toString(),
+        claimable: row.claimable.toString(),
+        claimed: row.claimed.toString(),
+      })
+    }
+    return {
+      vaultId: vault,
+      vault,
+      token: getAddress(token),
+      creator: getAddress(creator),
+      name,
+      symbol,
+      metadataURI,
+      description: descriptionFromUri(metadataURI),
+      supply: supply.toString(),
+      realEth: realEth.toString(),
+      tokenReserve: tokenReserve.toString(),
+      rewardPot: rewardPot.toString(),
+      participants: participants.toString(),
+      pendingRewards: pendingRewards?.toString() ?? null,
+      tokenBalance: tokenBalance?.toString() ?? null,
+      buyVolume: buyVolume?.toString() ?? null,
+      sellVolume: sellVolume?.toString() ?? null,
+      tradeCount: tradeCount?.toString() ?? null,
+      streams,
     }
   }
   async prepare(input: Record<string, unknown>) {
