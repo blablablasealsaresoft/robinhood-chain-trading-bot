@@ -2,6 +2,7 @@ import { formatUnits,getAddress,isAddress,parseUnits,zeroAddress,type Address } 
 import type { Market } from '../framework/market.js'
 import type { AssetRegistry } from './assets.js'
 import { HubError } from './manual-swaps.js'
+import { depthSellAmount } from './depth-sizing.js'
 
 const LEVELS=[10,25,50,100,250,500] as const
 type DepthLevel={notionalUsd:number;available:boolean;executionPriceUsd:number|null;amountIn:string|null;amountOut:string|null;slippageBps:number|null;gasEstimate:string|null;routeHops:number|null;routeFees:number[]|null}
@@ -32,10 +33,8 @@ export class MarketDepthService {
         buys.push(level(notional,buy.amountIn,buy.amountOut,execution,buy.gasEstimate,buy.route.fees))
       }
 
-      const tokenAmount=notional/reference
-      let tokenIn:bigint
-      try{tokenIn=parseUnits(decimalInput(tokenAmount,asset.decimals),asset.decimals)}catch{tokenIn=0n}
-      if(tokenIn<=0n){sells.push(unavailable(notional));continue}
+      const tokenIn=depthSellAmount(notional,reference,asset.decimals)
+      if(tokenIn===null){sells.push(unavailable(notional));continue}
       const sell=await this.market.quoteSell(address,this.market.usdg,tokenIn)
       if(!sell||sell.amountOut<=0n)sells.push(unavailable(notional))
       else{
@@ -56,7 +55,7 @@ export class MarketDepthService {
       buy:buys,sell:sells,
       maxExecutableBuyUsd:maxAvailable(buys),maxExecutableSellUsd:maxAvailable(sells),
       source:'hoodchain/uniswap-v3-quoter',
-      note:'Executable quote-depth probes against live Uniswap v3 routing. This is not an order book, committed liquidity, or a guarantee that a later transaction receives the same price.',
+      note:'Executable quote-depth probes against live Uniswap v3 routing. This is not an order book, committed liquidity, or a guarantee that a later transaction receives the same price. Sell quantities round down to token base units; sub-base-unit probes are unavailable.',
     }
   }
 }
@@ -73,9 +72,3 @@ function applySlippage(rows:DepthLevel[],side:'buy'|'sell'){
  }
 }
 function maxAvailable(rows:DepthLevel[]):number|null{return rows.filter(x=>x.available).at(-1)?.notionalUsd??null}
-function decimalInput(value:number,decimals:number):string{
- if(!Number.isFinite(value)||value<=0)throw new Error('invalid amount')
- const precision=Math.min(decimals,18)
- const fixed=value.toFixed(precision).replace(/0+$/,'').replace(/.$/,'')
- return fixed==='0'?Math.pow(10,-precision).toFixed(precision):fixed
-}

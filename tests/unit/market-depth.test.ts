@@ -50,6 +50,23 @@ describe('MarketDepthService',()=>{
   expect(result.referencePriceUsd).toBe(10)
   expect(result.asset.type).toBe('stock-token')
  })
+ it('quotes the actual fractional sell input rather than trimming a significant digit',async()=>{
+  const f=fixture()
+  vi.mocked(f.market.spotPrice).mockResolvedValue({token:asset,priceUsd:2000,via:'usdg',ts:1})
+  await f.service.read(asset)
+  expect(f.quoteSell).toHaveBeenNthCalledWith(1,asset,usdg,5000000000000000n)
+  expect(f.quoteSell).toHaveBeenCalledTimes(6)
+ })
+ it('does not round sub-base-unit sell probes up to a fabricated minimum size',async()=>{
+  const f=fixture()
+  vi.mocked(f.market.spotPrice).mockResolvedValue({token:asset,priceUsd:2000,via:'usdg',ts:1})
+  const row={id:'whole',chainId:4663,address:asset,symbol:'WHOLE',name:'Whole token',decimals:0,type:'crypto',source:'test',tradable:true}
+  const registry={chainId:4663,get:()=>row,list:()=>[row]} as unknown as AssetRegistry
+  const result=await new MarketDepthService(f.market,registry,()=>123456).read(asset)
+  expect(f.quoteSell).not.toHaveBeenCalled()
+  expect(result.sell.every(level=>!level.available&&level.amountIn===null)).toBe(true)
+  expect(result.maxExecutableSellUsd).toBeNull()
+ })
  it('validates network, asset, and reference availability',async()=>{
   const f=fixture()
   await expect(f.service.read('bad')).rejects.toMatchObject({code:'INVALID_ASSET'})
