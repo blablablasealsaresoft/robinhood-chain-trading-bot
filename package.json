@@ -48,7 +48,13 @@
   "scripts": {
     "build": "tsup",
     "start": "node dist/main.js",
+    "start:hub": "node dist/hub-main.js",
+    "start:live-automation": "node dist/live-automation-main.js",
+    "shadow:mainnet": "node dist/shadow-main.js",
+    "shadow:schedule": "node dist/shadow-scheduler-main.js",
     "dev": "tsx watch src/main.ts",
+    "hub": "tsx src/hub-main.ts",
+    "hub:journal": "tsx src/hub-journal.ts",
     "fleet": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests/unit",

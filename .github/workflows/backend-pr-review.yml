@@ -1,0 +1,46 @@
+name: Verify backend pull requests
+on:
+  push:
+    branches:
+      - chatgpt/**
+  pull_request:
+    branches: [main, alpha-integrated-backend]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: backend-review-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HOOD_TRADERS_LIVE: '0'
+      ROBINHOOD_CHAIN_PRIVATE_KEY: ''
+      HOOD_STOCK_TOKEN_ELIGIBLE: 'false'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: mkdir -p review-results
+      - run: npm ci
+      - run: npm run typecheck 2>&1 | tee review-results/typecheck.txt
+      - run: npm test 2>&1 | tee review-results/unit-tests.txt
+      - run: npm run build 2>&1 | tee review-results/build.txt
+      - name: Capture source reviewed by this run
+        if: always()
+        run: git archive --format=tar.gz --output=review-results/backend-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-pr-review
+          path: review-results/
+          retention-days: 7

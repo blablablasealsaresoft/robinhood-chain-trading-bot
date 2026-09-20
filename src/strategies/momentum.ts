@@ -1,4 +1,5 @@
-import { getRecentLaunches, parseUsdg, type Launch } from 'hoodchain'
+import { parseUsdg, type Launch } from 'hoodchain'
+import { getRecentLaunchesReliable } from '../framework/launches.js'
 import type { Address } from 'viem'
 import type {
   Strategy,
@@ -176,7 +177,7 @@ export class Momentum implements Strategy {
   private async discover(ctx: StrategyTickContext): Promise<void> {
     let launches: Launch[]
     try {
-      launches = await getRecentLaunches(ctx.market.client, { lookbackBlocks: this.p.discoveryLookbackBlocks })
+      launches = await getRecentLaunchesReliable(ctx.market.client, { lookbackBlocks: this.p.discoveryLookbackBlocks , onError:(error)=>ctx.log(error.message) })
     } catch (err) {
       ctx.log(`momentum discovery failed: ${err instanceof Error ? err.message : String(err)}`)
       return

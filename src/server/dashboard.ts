@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import type { Fleet } from '../framework/fleet.js'
+import { createHubHandler } from './hub.js'
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -45,8 +46,10 @@ async function serveStatic(staticRoot: string, req: IncomingMessage, res: Server
  * the path once and passes it in.
  */
 export function createDashboardServer(fleet: Fleet, staticRoot: string): Server {
+  const handleHub = createHubHandler(fleet)
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
+
 
     if (url.pathname === '/api/summary' && req.method === 'GET') {
       return json(res, 200, fleet.summary())
@@ -73,10 +76,9 @@ export function createDashboardServer(fleet: Fleet, staticRoot: string): Server 
       fleet.tripKill('dashboard')
       return json(res, 200, { killed: true, reason: 'dashboard' })
     }
-    if (url.pathname === '/api/health' && req.method === 'GET') {
-      return json(res, 200, { ok: true })
-    }
 
+    // Preserve the original dashboard routes, especially its emergency stop.
+    if (await handleHub(req, res, url)) return
     if (await serveStatic(staticRoot, req, res)) return
     res.writeHead(404, { 'content-type': 'text/plain' })
     res.end('not found')

@@ -56,6 +56,8 @@ export class Fleet {
     this.journal = new Journal(config.dbPath)
     this.kill = new KillSwitch(config.killFile)
     this.market = new Market(config, this.account ?? undefined)
+    this.spentDay=utcDayStart(Date.now())
+    this.fleetSpentTodayUsd=config.mode==='paper'?this.journal.paperSpentSince(this.spentDay):this.journal.liveSpentSince(this.spentDay)
   }
 
   /** Build agents from specs. */
@@ -65,6 +67,8 @@ export class Fleet {
       this.agents.push(
         new Agent({
           id: spec.id,
+          stateScope: this.config.network+':'+this.market.usdg.toLowerCase(),
+          restoreFleetSpend: false,
           strategy: spec.strategy,
           market: this.market,
           limits,
@@ -119,6 +123,27 @@ export class Fleet {
 
   agentStatuses(): AgentStatus[] {
     return this.agents.map((a) => a.status())
+  }
+
+  /** Hub lifecycle adapter. Execution and risk checks remain in Agent. */
+  agentDescriptions() {
+    return this.agents.map(a => ({ ...a.status(), name: a.strategy.title, description: a.strategy.meta.edge, params: a.strategy.meta.params, failureModes: a.strategy.meta.failureModes }))
+  }
+  private readonly controlQueue = new Map<string, Promise<unknown>>()
+  async controlPaperAgent(id: string, action: 'start' | 'stop'): Promise<void> {
+    if (this.config.mode !== 'paper' || this.account) throw new Error('Hub controls require a signer-free paper fleet.')
+    const agent = this.agents.find(a => a.id === id)
+    if (!agent) throw new Error('Unknown strategy')
+    const previous = this.controlQueue.get(id) ?? Promise.resolve()
+    const next = previous.catch(() => undefined).then(async () => {
+      if (action === 'start') {
+        if (this.kill.isKilled()) throw new Error('The fleet is halted')
+        try { await agent.start() } catch (error) { agent.stop(); throw error }
+      } else agent.stop()
+      this.journal.recordDecision({ agentId: id, ts: Date.now(), kind: 'observe', detail: action === 'start' ? 'Paper strategy started from Hub' : 'Paper strategy stopped; an in-flight tick may finish', meta: {} })
+    })
+    this.controlQueue.set(id, next)
+    try { await next } finally { if (this.controlQueue.get(id) === next) this.controlQueue.delete(id) }
   }
 
   summary(): FleetSummary {

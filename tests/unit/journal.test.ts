@@ -109,4 +109,38 @@ describe('Journal', () => {
     journal.recordTrade(trade({ agentId: 'agent-2', ts: 2 }))
     expect(journal.allRecentTrades(10)).toHaveLength(2)
   })
+
+  it('round-trips versioned paper agent state without bigint precision loss', () => {
+    journal = new Journal(':memory:')
+    journal.recordAgentState({
+      version:1,agentId:'agent-1',strategyId:'scripted',mode:'paper',updatedAt:2000,
+      spentDay:0,spentTodayUsd:40,lastTradeAt:1900,realizedUsd:3.25,ticks:5,trades:2,refusals:1,lastTickAt:2000,
+      positions:[{token:TOKEN,tokenSymbol:'MEME',amount:'20000000000000000001',costBasis:'9007199254740993123456',investedUsd:40,quoteToken:USDG,quoteSymbol:'USDG',openedAt:1000,markUsd:42,meta:{source:'test'}}],
+    })
+    expect(journal.agentState('agent-1')).toMatchObject({
+      version:1,strategyId:'scripted',spentTodayUsd:40,
+      positions:[{amount:'20000000000000000001',costBasis:'9007199254740993123456',meta:{source:'test'}}],
+    })
+  })
+  it('preserves a complete portfolio observation on an incomplete same-block retry',()=>{
+    journal=new Journal(':memory:')
+    const account='0x1111111111111111111111111111111111111111'
+    journal.recordPortfolioSnapshot({chainId:4663,account,blockNumber:'1',observedAt:1000,pricedValueUsd:100,incomplete:false})
+    journal.recordPortfolioSnapshot({chainId:4663,account,blockNumber:'1',observedAt:2000,pricedValueUsd:5,incomplete:true})
+    expect(journal.portfolioSnapshots(4663,account,0)).toEqual([{chainId:4663,account,blockNumber:'1',observedAt:1000,pricedValueUsd:100,incomplete:false}])
+  })
+  it('prunes portfolio observations older than thirty days',()=>{
+    journal=new Journal(':memory:')
+    const account='0x1111111111111111111111111111111111111111'
+    journal.recordPortfolioSnapshot({chainId:4663,account,blockNumber:'1',observedAt:1000,pricedValueUsd:100,incomplete:false})
+    journal.recordPortfolioSnapshot({chainId:4663,account,blockNumber:'2',observedAt:31*86400000,pricedValueUsd:100,incomplete:false})
+    expect(journal.portfolioSnapshots(4663,account,0).map(p=>p.blockNumber)).toEqual(['2'])
+  })
+
+
+  it('healthProbe verifies SQLite writes without leaving synthetic journal rows', () => {
+    journal = new Journal(':memory:')
+    expect(journal.healthProbe()).toEqual({readable:true,writable:true})
+    expect(journal.recentDecisions('hub:health',10)).toEqual([])
+  })
 })

@@ -1,3 +1,4 @@
+import { rpcOptionsFromEnv } from './rpc.js'
 import type { HoodNetwork } from 'hoodchain'
 import type { Mode, RiskLimits } from './types.js'
 import type { LlmClientConfig, LlmProvider } from './llm.js'
@@ -6,6 +7,14 @@ import type { LlmClientConfig, LlmProvider } from './llm.js'
 export interface FleetConfig {
   network: HoodNetwork
   rpcUrl: string | undefined
+  /** Optional fallback RPCs used only for read-only calls. */
+  rpcFallbackUrls?: string[]
+  /** Shared RPC request concurrency cap. */
+  rpcMaxConcurrency?: number
+  /** Per-endpoint retries for safe/read-only RPC calls. */
+  rpcReadRetries?: number
+  /** Per-request RPC timeout. */
+  rpcTimeoutMs?: number
   mode: Mode
   /** Set true only when HOOD_TRADERS_LIVE=1 AND a key is present. */
   hasWallet: boolean
@@ -44,6 +53,7 @@ function bool(name: string, fallback: boolean): boolean {
  * silently spend real funds.
  */
 export function loadFleetConfig(env: NodeJS.ProcessEnv = process.env): FleetConfig {
+  const rpc = rpcOptionsFromEnv(env)
   const network = (env.HOOD_NETWORK === 'testnet' ? 'testnet' : 'mainnet') as HoodNetwork
   const wantLive = bool('HOOD_TRADERS_LIVE', false)
   const privateKey = env.ROBINHOOD_CHAIN_PRIVATE_KEY as `0x${string}` | undefined
@@ -52,7 +62,11 @@ export function loadFleetConfig(env: NodeJS.ProcessEnv = process.env): FleetConf
 
   return {
     network,
-    rpcUrl: env.HOOD_RPC_URL || undefined,
+    rpcUrl: rpc.primaryUrl,
+    rpcFallbackUrls: rpc.fallbackUrls,
+    rpcMaxConcurrency: rpc.maxConcurrency,
+    rpcReadRetries: rpc.readRetries,
+    rpcTimeoutMs: rpc.timeoutMs,
     mode,
     hasWallet: hasKey,
     privateKey: hasKey ? privateKey : undefined,
@@ -74,7 +88,7 @@ const LLM_PROVIDERS: readonly LlmProvider[] = ['anthropic', 'openai', 'groq', 'o
 
 /**
  * Resolve LLM config for {@link LlmStrategist} from the environment. Returns
- * `null` when `HOOD_LLM_PROVIDER` or `HOOD_LLM_API_KEY` is unset — the
+ * `null` when `HOOD_LLM_PROVIDER` or `HOOD_LLM_API_KEY` is unset â€” the
  * strategy is optional and simply isn't added to the fleet in that case (see
  * main.ts). Throws only when `HOOD_LLM_PROVIDER` is set to an unrecognized
  * value, since that is very likely a typo the operator would want to know
@@ -103,4 +117,28 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmClientCo
 /** Minimum LLM confidence required to convert a `buy` verdict into a trade. */
 export function loadLlmMinConfidence(env: NodeJS.ProcessEnv = process.env): number {
   return num('HOOD_LLM_MIN_CONFIDENCE', 0.6)
+}
+
+
+/** Hub API bind host. Defaults to loopback; containers must opt into 0.0.0.0 explicitly. */
+export function loadHubBindHost(env:NodeJS.ProcessEnv=process.env):string {
+  const value=(env.HUB_BIND_HOST||'127.0.0.1').trim()
+  if(!value||value.length>253||/[\s/\\]/.test(value)||value.includes('://'))throw new Error('HUB_BIND_HOST must be a hostname or IP address without a scheme or path')
+  if(!/^[A-Za-z0-9.:[\]-]+$/.test(value))throw new Error('HUB_BIND_HOST contains unsupported characters')
+  return value
+}
+
+
+export interface LiveAutomationConfig {
+  enabled:boolean
+  agents:string[]
+}
+export function loadLiveAutomationConfig(env:NodeJS.ProcessEnv=process.env):LiveAutomationConfig {
+  const enabled=env.HUB_LIVE_AUTOMATION==='I_UNDERSTAND_REAL_FUNDS'
+  const agents=(env.HUB_LIVE_AUTOMATION_AGENTS||'').split(',').map(x=>x.trim()).filter(Boolean)
+  if(!enabled)return {enabled:false,agents:[]}
+  if(!agents.length)throw new Error('HUB_LIVE_AUTOMATION_AGENTS must explicitly list at least one approved strategy')
+  const allowed=new Set(['sniper-1','momentum-1','premium-1'])
+  if(agents.some(id=>!allowed.has(id))||new Set(agents).size!==agents.length)throw new Error('HUB_LIVE_AUTOMATION_AGENTS contains an unsupported or duplicate strategy')
+  return {enabled:true,agents}
 }

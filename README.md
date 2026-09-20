@@ -1,3 +1,74 @@
+# Trading Hub backend integration
+
+This is the **backend** component branch of [Robinhood Chain Trading Hub](https://github.com/blablablasealsaresoft/robinhood-trading-hub). Clone into a sibling directory named `robinhood-chain-trading-bot`; follow the main branch README for the full setup.
+
+For the integrated Hub, run `npm ci`, `npm run build`, then **`node dist/hub-main.js`**. This entrypoint binds loopback port 4670, forces paper mode, attaches no bot signer, and starts all strategies stopped. It includes the shared AssetRegistry, manual unsigned swap/wrap preparation, wallet receipt verification, persistent bridge/launch observations, unsigned native launch/sale actions and separate dry-run arbitrage adapter. Native launching requires both HUB_LAUNCH_FACTORY and HUB_LAUNCH_FACTORY_BLOCK for a reviewed deployment. The read-only launch monitor feeds the existing registry and Journal; it does not authorize automatic buys. Process environment configures RPC and Journal paths; dotenv is not loaded automatically.
+
+The local Hub now also includes portfolio value history, reviewed ERC-20 trading (HUB_TRADE_ASSETS), persistent operator bearer authentication (HUB_OPERATOR_TOKEN), and durable paper strategy state. Operator mode disables preview-token authentication. Existing paper trades without compatible snapshots fail closed and require reconciliation; retain the Journal rather than deleting records. These settings belong to the dedicated hub-main entrypoint, not the original live dashboard.
+
+## Published integration checkpoint
+
+PRs #1-#10 were reviewed and integrated with regression fixes. This includes bounded slippage, Journal data used by frontend CSV export, and GET /api/health RPC/Journal diagnostics. Latest recorded validation after the RPC fixes: **243 unit tests**, typecheck and build passed.
+
+The reviewed mainnet factory is **0xf1981c4b82961a85fdd86c08f3cccb7e2dfc9f43**, block **66613147**. With matching launchpad dependencies installed and npm run compile completed there, start the configured Hub with:
+
+    node scripts/hub-with-launch.mjs
+
+This reads the sibling deployments/4663.json and artifacts, verifies the receipt and runtimes, then imports dist/hub-main.js. HOOD_RPC_URL and HUB_LAUNCHPAD_PATH override defaults. Public RPC failures remain a beta blocker; startup stops on failed verification.
+
+HUBLIFE creation, 0.001 ETH contribution and 1,000-token claim are confirmed; final ETH proceeds withdrawal is unverified. The Hub remains signerless and paper-only for automation. Wallet-scoped history, production sessions/hosting and funded acceptance remain open. See the [beta plan](https://github.com/blablablasealsaresoft/robinhood-trading-hub/blob/main/docs/hub/BETA-LAUNCH-PLAN.md).
+
+The Docker/live-fleet entrypoints below start the original framework, not the complete Hub beta.
+
+## Signerless Hub container
+
+The beta Hub has a dedicated container profile. It is intentionally separate from the original autonomous fleet Dockerfile.
+
+```bash
+docker compose -f docker-compose.hub.yml up --build -d
+curl http://127.0.0.1:4670/api/health
+```
+
+The profile:
+- starts `dist/hub-main.js`, never `dist/main.js`
+- forces the Hub's signerless/paper execution boundary in code
+- publishes the raw API only on host loopback (`127.0.0.1:4670`)
+- persists SQLite at `/app/data/hood-traders.db`
+- runs as an unprivileged user with a read-only root filesystem
+- exposes a Docker healthcheck backed by `GET /api/health`
+- does not accept or forward `ROBINHOOD_CHAIN_PRIVATE_KEY`
+- expects HTTPS and user/operator authentication to terminate at a same-host reverse proxy or gateway
+
+Set `HUB_BIND_HOST=0.0.0.0` only inside the container. Local direct runs continue to default to `127.0.0.1`.
+
+For beta, configure a dedicated `HOOD_RPC_URL`, at least one `HOOD_RPC_FALLBACK_URLS` endpoint, a strong `HUB_OPERATOR_TOKEN`, reviewed `HUB_TRADE_ASSETS`, and the verified launch factory variables. Store secrets in the deployment platform's secret manager or an untracked environment file; `.dockerignore` excludes local environment files and data.
+
+The persistent volume is part of the application's safety state: it contains wallet receipt reconciliation, launch/bridge observations, portfolio history and paper risk state. Back it up before upgrades and verify restore procedures in staging. Do not replace the volume as a routine redeploy.
+
+## Shared RPC reliability
+
+Market/Fleet clients and the verified launch startup share the same transport instance for matching configuration. Configure process environment before startup:
+
+| Variable | Default / accepted values |
+|---|---|
+| HOOD_RPC_URL | Robinhood Chain public endpoint; use a dedicated primary for beta |
+| HOOD_RPC_FALLBACK_URLS | Comma-separated HTTP(S) read fallback endpoints |
+| HOOD_RPC_MAX_CONCURRENCY | 8; integer 1-32 |
+| HOOD_RPC_READ_RETRIES | 1 per endpoint; integer 0-3 |
+| HOOD_RPC_TIMEOUT_MS | 8000 per network attempt; integer 500-30000 |
+
+Only explicitly allowlisted idempotent reads retry, coalesce or fail over. Transaction submission and unknown methods are primary-only, single-attempt and never coalesced. Ambiguous submission errors still require transaction reconciliation before any new user action. The transport disables viem retries.
+
+Node-local filter methods are rejected before network I/O. Existing viem launch watchers consequently use stateless block-range log polling; tests cover two watchers, failed ranges, fallback recovery and independent stopping. This does not add a durable cross-restart event index.
+
+Endpoint validation is single-flight. Responses require a matching request ID and valid result/error envelope. Moving latest/pending bytecode is not cached. Diagnostics expose endpoint indexes, counters and sanitized errors, without RPC URLs or credentials.
+
+Build before running node scripts/hub-with-launch.mjs: it imports dist/rpc.js from the same bundle as Market, preserving deployment receipt and runtime verification. Local validation includes 243 backend tests and a successful read-only mainnet startup check: chain 4663, healthy Journal and Launch ready. A single live check does not replace sustained beta acceptance or provision dedicated fallback endpoints.
+
+The original framework documentation and license follow. Its standalone live-fleet entrypoints are distinct from the Hub preview.
+
+---
+
 # hood-traders
 
 [![Run on Google Cloud](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run?git_repo=https://github.com/nirholas/robinhood-chain-trading-bot)
