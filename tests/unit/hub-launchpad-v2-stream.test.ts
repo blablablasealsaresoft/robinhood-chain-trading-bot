@@ -59,6 +59,25 @@ describe('StreamAuthService', () => {
     ).rejects.toMatchObject({ code: 'INVALID_SIGNATURE' })
   })
 
+
+  it('mints data-only viewer grants without media publish permission', () => {
+    process.env.LIVEKIT_API_KEY = 'test-key'
+    process.env.LIVEKIT_API_SECRET = 'test-secret'
+    const forever = { list: vi.fn(async () => ({ vaults: [] })) } as never
+    const auth = new StreamAuthService(journal(), { chainId: 4663, forever })
+    const token = (auth as any).livekitJwt('room-1', '0xabc:viewer:nonce', false, true) as string
+    const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'))
+    expect(claims.video).toMatchObject({
+      roomJoin: true,
+      room: 'room-1',
+      canPublish: false,
+      canSubscribe: true,
+      canPublishData: true,
+    })
+    delete process.env.LIVEKIT_API_KEY
+    delete process.env.LIVEKIT_API_SECRET
+  })
+
   it('rejects a LiveKit webhook without a valid HMAC signature, accepts one with a valid signature, and updates mediaState', () => {
     process.env.LIVEKIT_WEBHOOK_SECRET = 'test-secret'
     const forever = { list: vi.fn(async () => ({ vaults: [] })) } as never
