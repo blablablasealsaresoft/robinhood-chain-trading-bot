@@ -5,10 +5,11 @@ import type { Journal,ExternalEventRecord,WalletActivityRecord } from '../framew
 import type { AssetRegistry } from './assets.js'
 import type { Asset } from './types.js'
 import { HubError } from './manual-swaps.js'
-import { launchFactoryAbi,saleAbi,tokenFactoryAbi } from './launchpad-abi.js'
+import { launchFactoryAbi,launchTokenAbi,saleAbi,tokenFactoryAbi } from './launchpad-abi.js'
 import { launchActionKinds,launchActionTitles,type LaunchAction,type LaunchTerms,type PreparedLaunch,type SaleSnapshot,type LaunchpadStatus } from './launchpad-types.js'
 interface Options {chainId:number;factory?:string;deploymentBlock?:string;isKilled:()=>boolean;journal:Journal;registry:AssetRegistry}
 const source='hub-launchpad'
+const SNAPSHOT_LIMIT=100n
 const eventAbi=launchFactoryAbi.find(x=>x.type==='event'&&x.name==='LaunchCreated')!
 function account(v:unknown):Address {if(typeof v!=='string'||!isAddress(v)||v.toLowerCase()===zeroAddress)throw new HubError(400,'INVALID_ADDRESS','Enter a valid wallet address.');return getAddress(v)}
 function integer(v:unknown,min:bigint,max:bigint,label:string):bigint {if(typeof v!=='string'||!/^\d{1,78}$/.test(v)||BigInt(v)<min||BigInt(v)>max)throw new HubError(400,'INVALID_TERMS','Invalid '+label+'.');return BigInt(v)}
@@ -163,29 +164,70 @@ export class LaunchpadService {
  }
  async recent(){
   if(!this.factory||this.error)return []
-  await this.scan()
-  return this.records().filter(e=>e.status==='confirmed'||e.status==='confirming')
-   .sort((a,b)=>b.at-a.at).slice(0,24).map(e=>({
-    launchpad:'hub-launchpad',id:e.data.launchId,token:e.data.token,creator:e.data.creator,sale:e.data.sale,
-    pool:null,blockNumber:e.data.blockNumber,transactionHash:e.txHash,name:e.data.name,symbol:e.data.symbol,
-    metadataURI:e.data.metadataURI,asset:this.options.registry.get(e.data.token as Address)??e.data.asset,
-    tradeEnabled:false,verification:e.status,
-   }))
+  const {launches}=await this.list()
+  return launches.map(e=>({
+    launchpad:'hub-launchpad',id:e.launchId,token:e.token,creator:e.creator,sale:e.sale,
+    pool:null,blockNumber:e.blockNumber,transactionHash:e.creationTxHash||e.sale,name:e.name,symbol:e.symbol,
+    metadataURI:e.metadataURI,asset:this.options.registry.get(e.token)??{address:e.token,symbol:e.symbol,name:e.name,decimals:18,type:'launch-token' as const,source,tradable:false},
+    tradeEnabled:false,verification:e.creationTxHash?'confirmed':'registry',
+  }))
  }
  async list(owner?:string|null){
   const wallet=owner?account(owner):undefined
-  if(!this.factory||this.error)return {launches:[] as SaleSnapshot[],observedAt:Date.now(),coverage:'No configured factory.'}
-  await this.scan()
-  const rpc=this.market.client.public;await this.network()
+  if(!this.factory||this.error)return {launches:[] as SaleSnapshot[],observedAt:Date.now(),coverage:'No configured factory.',incomplete:false}
+  const factory=await this.checkFactory()
+  const rpc=this.market.client.public
   const block=await rpc.getBlockNumber()
+  const count=await rpc.readContract({address:factory,abi:launchFactoryAbi,functionName:'launchCount',blockNumber:block})
+  const take=count>SNAPSHOT_LIMIT?SNAPSHOT_LIMIT:count
+  const page=take===0n?[]:await rpc.readContract({address:factory,abi:launchFactoryAbi,functionName:'getLaunches',args:[0n,take],blockNumber:block})
+  const seen=new Map(this.records().filter(e=>e.status==='confirmed'||e.status==='confirming').map(e=>[String(e.data.sale||'').toLowerCase(),e]))
   const launches:SaleSnapshot[]=[]
-  for(const event of this.records().filter(e=>e.status==='confirmed').sort((a,b)=>b.at-a.at).slice(0,24)){
-   const d=event.data,sale=d.sale as Address
-   const read=<T extends 'supply'|'totalAllocated'|'totalRaised'|'softCap'|'hardCap'|'deadline'|'participants'|'status'|'proceedsWithdrawn'|'remainderWithdrawn'>(functionName:T)=>rpc.readContract({address:sale,abi:saleAbi,functionName,blockNumber:block})
-   const [supply,raised,soft,hard,deadline,participants,status,proceeds,remainder,contribution,allocation,totalAllocated]=await Promise.all([read('supply'),read('totalRaised'),read('softCap'),read('hardCap'),read('deadline'),read('participants'),read('status'),read('proceedsWithdrawn'),read('remainderWithdrawn'),wallet?rpc.readContract({address:sale,abi:saleAbi,functionName:'contributions',args:[wallet],blockNumber:block}):null,wallet?rpc.readContract({address:sale,abi:saleAbi,functionName:'allocations',args:[wallet],blockNumber:block}):null,read('totalAllocated')])
-   launches.push({launchId:d.launchId as string,sale,token:d.token as Address,creator:d.creator as Address,name:d.name as string,symbol:d.symbol as string,metadataURI:d.metadataURI as string,supply:supply.toString(),totalRaised:raised.toString(),softCap:soft.toString(),hardCap:hard.toString(),deadline:deadline.toString(),participants:participants.toString(),status:(['active','successful','failed'] as const)[status]!,contribution:contribution?.toString()??null,allocation:allocation?.toString()??null,proceedsWithdrawn:proceeds,remainderWithdrawn:remainder,remainderAvailable:(remainder||status===0?0n:status===2?supply:supply-totalAllocated).toString(),blockNumber:block.toString(),observedAt:Date.now(),creationTxHash:event.txHash})
+  let unread=0
+  for(let i=0;i<page.length;i++){
+   const sale=page[i]
+   if(!sale||!isAddress(sale)||sale.toLowerCase()===zeroAddress){unread++;continue}
+   try{launches.push(await this.snapshotSale(getAddress(sale),String(i),wallet,block,seen.get(sale.toLowerCase())))}
+   catch{unread++}
   }
-  return {launches,observedAt:Date.now(),coverage:'Latest 24 verified sales; discovery scans at most 30,000 blocks.'}
+  launches.reverse()
+  const omitted=count>BigInt(page.length)
+  return {
+   launches,
+   observedAt:Date.now(),
+   incomplete:omitted||unread>0,
+   coverage:omitted?`First ${page.length} of ${count.toString()} factory sales at block ${block.toString()}.`
+    :unread?`Factory registry at block ${block.toString()}; ${unread} sale${unread===1?'':'s'} could not be read.`
+    :`Factory registry at block ${block.toString()}; ${launches.length} sale${launches.length===1?'':'s'}.`,
+  }
+ }
+ private async snapshotSale(sale:Address,launchId:string,wallet:Address|undefined,block:bigint,seen?:ExternalEventRecord):Promise<SaleSnapshot>{
+  const rpc=this.market.client.public
+  const read=<T extends 'token'|'creator'|'supply'|'totalAllocated'|'totalRaised'|'softCap'|'hardCap'|'deadline'|'participants'|'status'|'proceedsWithdrawn'|'remainderWithdrawn'>(functionName:T)=>rpc.readContract({address:sale,abi:saleAbi,functionName,blockNumber:block})
+  const [token,creator,supply,raised,soft,hard,deadline,participants,status,proceeds,remainder,contribution,allocation,totalAllocated]=await Promise.all([
+   read('token'),read('creator'),read('supply'),read('totalRaised'),read('softCap'),read('hardCap'),read('deadline'),read('participants'),read('status'),read('proceedsWithdrawn'),read('remainderWithdrawn'),
+   wallet?rpc.readContract({address:sale,abi:saleAbi,functionName:'contributions',args:[wallet],blockNumber:block}):null,
+   wallet?rpc.readContract({address:sale,abi:saleAbi,functionName:'allocations',args:[wallet],blockNumber:block}):null,
+   read('totalAllocated'),
+  ])
+  if(!isAddress(token)||token.toLowerCase()===zeroAddress||!isAddress(creator)||creator.toLowerCase()===zeroAddress)throw new Error('incomplete sale')
+  const [tokenName,tokenSymbol,tokenUri]=await Promise.all([
+   rpc.readContract({address:token,abi:launchTokenAbi,functionName:'name',blockNumber:block}).catch(()=>''),
+   rpc.readContract({address:token,abi:launchTokenAbi,functionName:'symbol',blockNumber:block}).catch(()=>''),
+   rpc.readContract({address:token,abi:launchTokenAbi,functionName:'metadataURI',blockNumber:block}).catch(()=>''),
+  ])
+  const name=typeof tokenName==='string'&&tokenName?tokenName:typeof seen?.data.name==='string'?seen.data.name as string:''
+  const symbol=typeof tokenSymbol==='string'&&tokenSymbol?tokenSymbol:typeof seen?.data.symbol==='string'?seen.data.symbol as string:''
+  const metadataURI=typeof tokenUri==='string'&&tokenUri?tokenUri:typeof seen?.data.metadataURI==='string'?seen.data.metadataURI as string:''
+  if(!name||!symbol)throw new Error('incomplete sale')
+  this.options.registry.registerDiscovered({address:getAddress(token),symbol:symbol.slice(0,32),name:name.slice(0,100),decimals:18,type:'launch-token',source,tradable:false})
+  return {
+   launchId,sale:getAddress(sale),token:getAddress(token),creator:getAddress(creator),name,symbol,metadataURI,
+   supply:supply.toString(),totalRaised:raised.toString(),softCap:soft.toString(),hardCap:hard.toString(),deadline:deadline.toString(),participants:participants.toString(),
+   status:(['active','successful','failed'] as const)[status]!,contribution:contribution?.toString()??null,allocation:allocation?.toString()??null,
+   proceedsWithdrawn:proceeds,remainderWithdrawn:remainder,remainderAvailable:(remainder||status===0?0n:status===2?supply:supply-totalAllocated).toString(),
+   blockNumber:block.toString(),observedAt:Date.now(),creationTxHash:typeof seen?.txHash==='string'?seen.txHash:'',
+  }
  }
  monitorStatus(){
   const configured=!!this.factory&&this.deploymentBlock!==null&&!this.error

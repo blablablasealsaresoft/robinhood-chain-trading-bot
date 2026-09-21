@@ -25,9 +25,13 @@ function setup(config:{factory?:string;deploymentBlock?:string}={factory,deploym
  readContract:vi.fn(async({functionName}: {functionName:string}):Promise<any>=>{
   if(functionName==='tokenFactory')return tokenFactory
   if(functionName==='launchFactory')return factory
+  if(functionName==='launchCount')return 1n
   if(functionName==='getLaunches')return [sale]
   if(functionName==='token')return token
   if(functionName==='creator')return owner
+  if(functionName==='name')return 'Launch token'
+  if(functionName==='symbol')return 'NEW'
+  if(functionName==='metadataURI')return ''
   if(functionName==='status')return 0
   if(functionName==='proceedsWithdrawn'||functionName==='remainderWithdrawn')return false
   return 1n
@@ -150,6 +154,15 @@ it('projects canonical native factory observations for the combined discovery fe
  expect(rows).toHaveLength(1)
  expect(rows[0]).toMatchObject({launchpad:'hub-launchpad',id:'0',token,creator:owner,sale,pool:null,verification:'confirmed',tradeEnabled:false,name:'Launch token',symbol:'NEW'})
  expect(journal.externalEvents('launch')).toHaveLength(1)
+})
+it('lists factory sales from the on-chain registry without a recent log window',async()=>{
+ const f=setup()
+ const list=await f.service.list()
+ expect(f.rpc.getLogs).not.toHaveBeenCalled()
+ expect(list.launches).toHaveLength(1)
+ expect(list.incomplete).toBe(false)
+ expect(list.launches[0]).toMatchObject({launchId:'0',sale,token,creator:owner,name:'Launch token',symbol:'NEW',creationTxHash:''})
+ expect(f.registry.get(token)?.tradable).toBe(false)
 })
 
 it('refuses empty token-remainder preparations but preserves the ETH proceeds action',async()=>{
