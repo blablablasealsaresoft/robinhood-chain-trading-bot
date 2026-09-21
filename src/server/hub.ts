@@ -1,6 +1,8 @@
 import { hubHealth } from '../hub/health.js'
 import { LaunchpadService } from '../hub/launchpad.js'
+import { LaunchpadV2Service } from '../hub/launchpad-v2.js'
 import { ForeverService } from '../hub/forever.js'
+import { StreamAuthService } from '../hub/stream-auth.js'
 import { BridgeObservations } from '../hub/bridge-observations.js'
 import { NativeWrapService } from '../hub/native-wrap.js'
 import { WalletReceipts } from '../hub/wallet-receipts.js'
@@ -40,8 +42,10 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
   const factory=process.env.HUB_LAUNCH_FACTORY||process.env.HUB_LAUNCH_FACTORY_ADDRESS
   if(process.env.HUB_LAUNCH_FACTORY&&process.env.HUB_LAUNCH_FACTORY_ADDRESS&&process.env.HUB_LAUNCH_FACTORY.toLowerCase()!==process.env.HUB_LAUNCH_FACTORY_ADDRESS.toLowerCase())throw new Error('Conflicting Hub factory configuration')
   const launchpad=new LaunchpadService(market,{chainId:swaps.registry.chainId,factory,deploymentBlock:process.env.HUB_LAUNCH_FACTORY_BLOCK,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal,registry:swaps.registry})
+  const launchpadV2=new LaunchpadV2Service(market,{chainId:swaps.registry.chainId,factory:process.env.HUB_LAUNCH_FACTORY_V2,deploymentBlock:process.env.HUB_LAUNCH_FACTORY_V2_BLOCK,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal,registry:swaps.registry})
   const forever=new ForeverService(market,{chainId:swaps.registry.chainId,factory:process.env.HUB_FOREVER_FACTORY,deploymentBlock:process.env.HUB_FOREVER_FACTORY_BLOCK,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal})
-  receipts.observeWith(event=>launchpad.observeWallet(event))
+  const streamAuth=new StreamAuthService(fleet.journal,{chainId:swaps.registry.chainId,forever})
+  receipts.observeWith(event=>{void launchpad.observeWallet(event);void launchpadV2.observeWallet(event)})
   const controlToken = randomUUID()
   const controls = fleet.config.mode === 'paper' && !fleet.config.privateKey
   const operatorToken=validateOperatorToken(options.operatorToken)
@@ -55,7 +59,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     return secretEqual(auth.slice(7),operatorToken)
   }
   const handle=async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
+    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
     try {
       const origin = req.headers.origin
       if (origin && new URL(origin).host !== req.headers.host) throw new HubError(403, 'ORIGIN_NOT_ALLOWED', 'Use the configured same-origin Hub API proxy.')
@@ -98,6 +102,20 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         respond(res,200,await launchpad.list(url.searchParams.get('account')))
       } else if(path === '/api/launchpad/prepare' && req.method === 'POST') {
         respond(res,200,await launchpad.prepare(await readBody(req)))
+      } else if (path === '/api/launchpad-v2' && req.method === 'GET') {
+        respond(res,200,await launchpadV2.status())
+      } else if (path === '/api/launchpad-v2/sales' && req.method === 'GET') {
+        respond(res,200,await launchpadV2.list(url.searchParams.get('account')))
+      } else if (path === '/api/launchpad-v2/prepare' && req.method === 'POST') {
+        respond(res,200,await launchpadV2.prepare(await readBody(req)))
+      } else if (path === '/api/stream/challenge' && req.method === 'POST') {
+        respond(res,200,await streamAuth.challenge(await readBody(req)))
+      } else if (path === '/api/stream/publish-token' && req.method === 'POST') {
+        respond(res,200,await streamAuth.publishToken(await readBody(req)))
+      } else if (path === '/api/stream/viewer-token' && req.method === 'POST') {
+        respond(res,200,await streamAuth.viewerToken(await readBody(req)))
+      } else if (path === '/api/stream/session' && req.method === 'GET') {
+        respond(res,200,streamAuth.session(url.searchParams.get('vaultId'),url.searchParams.get('address')))
       } else if(path === '/api/forever' && req.method === 'GET') {
         respond(res,200,await forever.status())
       } else if(path === '/api/forever/vaults' && req.method === 'GET') {
@@ -108,14 +126,15 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
       } else if(path === '/api/forever/prepare' && req.method === 'POST') {
         respond(res,200,await forever.prepare(await readBody(req)))
       } else if (path === '/api/launches' && req.method === 'GET') {
-        const [sdkResult,hubResult]=await Promise.allSettled([discovery.recent(),launchpad.recent()])
-        if(sdkResult.status==='rejected'&&hubResult.status==='rejected')throw sdkResult.reason
+        const [sdkResult,hubResult,v2Result]=await Promise.allSettled([discovery.recent(),launchpad.recent(),launchpadV2.recent()])
+        if(sdkResult.status==='rejected'&&hubResult.status==='rejected'&&v2Result.status==='rejected')throw sdkResult.reason
         const sdk=sdkResult.status==='fulfilled'?sdkResult.value as {launches:Array<{blockNumber:string|bigint}>}:null
         const local=hubResult.status==='fulfilled'?hubResult.value:[]
-        const launches=[...local,...(sdk?.launches??[])].sort((a,b)=>BigInt(String(a.blockNumber))>BigInt(String(b.blockNumber))?-1:BigInt(String(a.blockNumber))<BigInt(String(b.blockNumber))?1:0).slice(0,48)
-        respond(res,200,{chainId:swaps.registry.chainId,observedAt:Date.now(),lookbackBlocks:'30000',source:'hoodchain + Hub LaunchFactory',launches,
-          incomplete:sdkResult.status==='rejected'||hubResult.status==='rejected',
-          coverage:'Recent SDK launches and configured Hub sales. Unavailable sources are marked partial; discovery never grants trading permission.'})
+        const v2=v2Result.status==='fulfilled'?v2Result.value:[]
+        const launches=[...local,...v2,...(sdk?.launches??[])].sort((a,b)=>BigInt(String(a.blockNumber))>BigInt(String(b.blockNumber))?-1:BigInt(String(a.blockNumber))<BigInt(String(b.blockNumber))?1:0).slice(0,48)
+        respond(res,200,{chainId:swaps.registry.chainId,observedAt:Date.now(),lookbackBlocks:'30000',source:'hoodchain + Hub LaunchFactory + LaunchFactoryV2',launches,
+          incomplete:sdkResult.status==='rejected'||hubResult.status==='rejected'||v2Result.status==='rejected',
+          coverage:'Recent SDK launches and configured Hub V1/V2 sales. Unavailable sources are marked partial; discovery never grants trading permission.'})
       } else if (path === '/api/portfolio' && req.method === 'GET') {
         respond(res, 200, await read.portfolio(url.searchParams.get('account')))
       } else if (path === '/api/portfolio/history' && req.method === 'GET') {
@@ -195,7 +214,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     }
     return true
   }
-  return Object.assign(handle,{startObservations:()=>{bridges.start();discovery.start();launchpad.start()},stopObservations:async()=>{await Promise.all([bridges.stop(),discovery.stop(),launchpad.stop()])}})
+  return Object.assign(handle,{startObservations:()=>{bridges.start();discovery.start();launchpad.start();launchpadV2.start()},stopObservations:async()=>{await Promise.all([bridges.stop(),discovery.stop(),launchpad.stop(),launchpadV2.stop()])}})
 }
 export function respond(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
