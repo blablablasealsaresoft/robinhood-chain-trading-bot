@@ -16,7 +16,7 @@ import type { DecisionRecord, EquityPoint, TradeRecord } from './types.js'
 
 export interface WalletPlanRecord {
   id: string; chainId: number; account: string; createdAt: number; expiresAt: number
-  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'|'launch-create'|'launch-contribute'|'launch-claim'|'launch-refund'|'launch-proceeds'|'launch-remainder'|'liquidity-add'|'forever-create'|'forever-buy'|'forever-sell'|'forever-depth'|'forever-rewards'|'forever-live'|'forever-end'|'forever-tip'|'forever-stream-claim'; to: string; data: string; value: string }[]
+  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'|'launch-create'|'launch-contribute'|'launch-claim'|'launch-refund'|'launch-proceeds'|'launch-remainder'|'launch-v2-create'|'launch-v2-contribute'|'launch-v2-claim'|'launch-v2-refund'|'launch-v2-proceeds'|'launch-v2-remainder'|'launch-v2-finalize'|'launch-v2-dust'|'liquidity-add'|'forever-create'|'forever-buy'|'forever-sell'|'forever-depth'|'forever-rewards'|'forever-live'|'forever-end'|'forever-tip'|'forever-stream-claim'|'forever-viewer-epoch-commit'|'forever-social-epoch-commit'; to: string; data: string; value: string }[]
 }
 export interface WalletActivityRecord {
   planId: string; chainId: number; account: string; txHash: string
@@ -39,9 +39,9 @@ export interface AgentStateRecord {
 }
 
 export interface ExternalEventRecord {
-  id:string; type:'bridge'|'launch'; source:string; chainId:number; txHash:string
+  id:string; type:'bridge'|'launch'|'forever-viewer-attestation'|'forever-social-attestation'; source:string; chainId:number; txHash:string
   owner:string|null; at:number; observedAt:number; status:string
-  verification:'unverified'|'provider'|'provider-and-receipt'|'chain-event'
+  verification:'unverified'|'provider'|'provider-and-receipt'|'chain-event'|'self-attested'|'operator-reviewed'
   title:string; detail:string; data:Record<string,unknown>
 }
 
@@ -451,7 +451,7 @@ export class Journal {
     const row=this.db.prepare('SELECT payload FROM external_events WHERE id=?').get(id) as {payload:string}|undefined
     return row?JSON.parse(row.payload):null
   }
-  externalEvents(type:'bridge'|'launch',limit=100,chainId?:number):ExternalEventRecord[] {
+  externalEvents(type:ExternalEventRecord['type'],limit=100,chainId?:number):ExternalEventRecord[] {
     const rows=this.db.prepare('SELECT payload FROM external_events WHERE type=? AND (? IS NULL OR chain_id=?) ORDER BY observed_at DESC LIMIT ?').all(type,chainId??null,chainId??null,Math.min(200,Math.max(1,limit))) as {payload:string}[]
     return rows.map(row=>JSON.parse(row.payload))
   }
@@ -474,7 +474,7 @@ export class Journal {
     const rows=this.db.prepare(sql).all(account,...(before?[before.at,before.at,before.key]:[]),bounded) as (Record<string,unknown>&{page_key:string})[]
     return rows.map(r=>({value:{id:r.id as number,agentId:r.agent_id as string,ts:r.ts as number,kind:r.kind as DecisionRecord['kind'],detail:r.detail as string,meta:JSON.parse((r.meta as string)||'{}')},at:r.ts as number,pageKey:r.page_key}))
   }
-  dueExternalEvents(type:'bridge'|'launch',now:number,limit=10,sources?:string[]):ExternalEventRecord[] {
+  dueExternalEvents(type:ExternalEventRecord['type'],now:number,limit=10,sources?:string[]):ExternalEventRecord[] {
     const filter=sources?.length?' AND json_extract(payload, \'$.source\') IN ('+sources.map(()=>'?').join(',')+')':''
     const rows=this.db.prepare('SELECT payload FROM external_events WHERE type=? AND next_check_at<=?'+filter+' ORDER BY next_check_at ASC LIMIT ?').all(type,now,...(sources??[]),limit) as {payload:string}[]
     return rows.map(row=>JSON.parse(row.payload))
@@ -482,7 +482,7 @@ export class Journal {
   deferExternalEvent(id:string,until:number):void {
     this.db.prepare('UPDATE external_events SET next_check_at=? WHERE id=?').run(until,id)
   }
-  pendingExternalCount(type:'bridge'|'launch'):number {
+  pendingExternalCount(type:ExternalEventRecord['type']):number {
     return (this.db.prepare('SELECT COUNT(*) AS n FROM external_events WHERE type=? AND next_check_at<?').get(type,Number.MAX_SAFE_INTEGER) as {n:number}).n
   }
 

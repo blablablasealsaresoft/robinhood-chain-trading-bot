@@ -2,6 +2,7 @@ import { hubHealth } from '../hub/health.js'
 import { LaunchpadService } from '../hub/launchpad.js'
 import { LaunchpadV2Service } from '../hub/launchpad-v2.js'
 import { ForeverService } from '../hub/forever.js'
+import { ForeverRewardsService } from '../hub/forever-rewards.js'
 import { StreamAuthService } from '../hub/stream-auth.js'
 import { BridgeObservations } from '../hub/bridge-observations.js'
 import { NativeWrapService } from '../hub/native-wrap.js'
@@ -45,7 +46,11 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
   const launchpadV2=new LaunchpadV2Service(market,{chainId:swaps.registry.chainId,factory:process.env.HUB_LAUNCH_FACTORY_V2,deploymentBlock:process.env.HUB_LAUNCH_FACTORY_V2_BLOCK,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal,registry:swaps.registry})
   const forever=new ForeverService(market,{chainId:swaps.registry.chainId,factory:process.env.HUB_FOREVER_FACTORY,deploymentBlock:process.env.HUB_FOREVER_FACTORY_BLOCK,isKilled:()=>fleet.kill.isKilled(),journal:fleet.journal})
   const streamAuth=new StreamAuthService(fleet.journal,{chainId:swaps.registry.chainId,forever})
-  receipts.observeWith(event=>{void launchpad.observeWallet(event);void launchpadV2.observeWallet(event)})
+  const foreverEpochOperator=process.env.HUB_FOREVER_EPOCH_OPERATOR
+  const foreverRewards=foreverEpochOperator&&/^0x[0-9a-fA-F]{40}$/.test(foreverEpochOperator)
+    ? new ForeverRewardsService(market,{chainId:swaps.registry.chainId,journal:fleet.journal,epochOperator:foreverEpochOperator as `0x${string}`})
+    : null
+  receipts.observeWith(async event=>{await launchpad.observeWallet(event);await launchpadV2.observeWallet(event)})
   const controlToken = randomUUID()
   const controls = fleet.config.mode === 'paper' && !fleet.config.privateKey
   const operatorToken=validateOperatorToken(options.operatorToken)
@@ -59,7 +64,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     return secretEqual(auth.slice(7),operatorToken)
   }
   const handle=async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
+    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|forever-community\/(?:attest\/(?:viewer|social)|epoch\/prepare)|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
     try {
       const origin = req.headers.origin
       if (origin && new URL(origin).host !== req.headers.host) throw new HubError(403, 'ORIGIN_NOT_ALLOWED', 'Use the configured same-origin Hub API proxy.')
@@ -116,6 +121,19 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         respond(res,200,await streamAuth.viewerToken(await readBody(req)))
       } else if (path === '/api/stream/session' && req.method === 'GET') {
         respond(res,200,streamAuth.session(url.searchParams.get('vaultId'),url.searchParams.get('address')))
+      } else if (path === '/api/forever-community/attest/viewer' && req.method === 'POST') {
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable viewer/social reward attestation.')
+        respond(res,200,foreverRewards.recordViewerAttestation(await readBody(req)))
+      } else if (path === '/api/forever-community/attest/social' && req.method === 'POST') {
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable viewer/social reward attestation.')
+        respond(res,200,foreverRewards.recordSocialAttestation(await readBody(req)))
+      } else if (path === '/api/forever-community/epoch/prepare' && req.method === 'POST') {
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable viewer/social reward attestation.')
+        if(!authorizedControl(req))throw new HubError(403,'OPERATOR_AUTH_REQUIRED','Committing a reward epoch requires an authenticated operator session.')
+        const body=await readBody(req)
+        const kind=body.kind==='viewer'||body.kind==='social'?body.kind:null
+        if(!kind||typeof body.vault!=='string'||typeof body.potWei!=='string')throw new HubError(400,'INVALID_EPOCH_REQUEST','Provide kind, vault, and potWei.')
+        respond(res,200,await foreverRewards.prepareEpoch(kind,body.vault as `0x${string}`,body.potWei))
       } else if(path === '/api/forever' && req.method === 'GET') {
         respond(res,200,await forever.status())
       } else if(path === '/api/forever/vaults' && req.method === 'GET') {
