@@ -19,10 +19,14 @@ type StreamSession = {
   endedAt: number | null
   mediaState: 'idle' | 'publisher-connected' | 'playable' | 'ended'
 }
+type VerifiedViewer = { sessionId: string; address: Address; verifiedAt: number; expiresAt: number }
+const VIEWER_VERIFICATION_TTL_MS = 30 * 60_000
 
 export class StreamAuthService {
   private challenges = new Map<string, Challenge>()
   private sessions = new Map<string, StreamSession>()
+  /** Server-issued proof that a wallet actually signed a challenge to join THIS session, not a self-reported claim. */
+  private verifiedViewers = new Map<string, VerifiedViewer>()
   private mintSecret = process.env.HUB_STREAM_TOKEN_SECRET || randomBytes(32).toString('hex')
   constructor(private journal: Journal, private options: { chainId: number; forever: ForeverService }) {}
 
@@ -164,19 +168,41 @@ export class StreamAuthService {
         : 'Set LIVEKIT_API_KEY, LIVEKIT_API_SECRET, and LIVEKIT_URL to enable real ingest. Hub token alone does not open media.',
     }
   }
+  /**
+   * Viewer credentials are separate and less privileged than publish credentials, but
+   * still require the same wallet-challenge proof — a viewer must authenticate a wallet
+   * (spec §4/§11), not just self-report an address. Reward eligibility later depends on
+   * this verified join, not on an unauthenticated client claim.
+   */
   async viewerToken(input: Record<string, unknown>) {
-    if (Object.keys(input).some((k) => !['vaultId', 'sessionId', 'address'].includes(k))) throw new HubError(400, 'UNEXPECTED_FIELD', 'Unsupported viewer-token field.')
+    if (Object.keys(input).some((k) => !['vaultId', 'sessionId', 'address', 'signature', 'nonce'].includes(k))) {
+      throw new HubError(400, 'UNEXPECTED_FIELD', 'Unsupported viewer-token field.')
+    }
     const vaultId = this.vault(input.vaultId)
     const sessionId = typeof input.sessionId === 'string' ? input.sessionId : ''
-    const address = input.address ? this.account(input.address) : null
+    const address = this.account(input.address)
+    const nonce = typeof input.nonce === 'string' ? input.nonce : ''
+    const signature = typeof input.signature === 'string' ? (input.signature as Hex) : null
+    if (!nonce || !signature) throw new HubError(400, 'INVALID_SIGNATURE', 'Provide nonce and wallet signature. Viewers must authenticate a wallet, not self-report an address.')
     const session = this.sessions.get(sessionId)
     if (!session || session.vaultId.toLowerCase() !== vaultId.toLowerCase() || session.endedAt) {
       throw new HubError(404, 'SESSION_NOT_FOUND', 'No active stream session for this vault. Server owns room mapping; do not invent a room id.')
     }
     if (typeof input.providerRoomId === 'string') throw new HubError(400, 'UNEXPECTED_FIELD', 'Browser-supplied room ids are rejected.')
+    const challenge = this.challenges.get(this.key(vaultId, address))
+    if (!challenge || challenge.nonce !== nonce) throw new HubError(401, 'CHALLENGE_REQUIRED', 'Request a fresh stream challenge first.')
+    if (Date.now() >= challenge.expiresAt) {
+      this.challenges.delete(this.key(vaultId, address))
+      throw new HubError(401, 'CHALLENGE_EXPIRED', 'Stream challenge expired. Request again.')
+    }
+    const ok = await verifyMessage({ address, message: this.challengeMessage(challenge), signature })
+    if (!ok) throw new HubError(401, 'BAD_SIGNATURE', 'Wallet signature does not match the challenge.')
+    this.challenges.delete(this.key(vaultId, address))
+    const now = Date.now()
+    this.verifiedViewers.set(sessionId + ':' + address.toLowerCase(), { sessionId, address, verifiedAt: now, expiresAt: now + VIEWER_VERIFICATION_TTL_MS })
     session.mediaState = session.mediaState === 'idle' ? 'playable' : session.mediaState
     const hubToken = this.mint({ role: 'viewer', vaultId, sessionId, room: session.providerRoomId, address }, TOKEN_TTL_MS)
-    const livekit = this.livekitJwt(session.providerRoomId, (address || 'viewer:' + randomBytes(4).toString('hex')).toLowerCase(), false)
+    const livekit = this.livekitJwt(session.providerRoomId, address.toLowerCase(), false)
     return {
       role: 'viewer' as const,
       provider: PROVIDER,
@@ -188,6 +214,15 @@ export class StreamAuthService {
       livekitUrl: process.env.LIVEKIT_URL || null,
       mediaState: session.mediaState,
     }
+  }
+  /**
+   * Public check used by ForeverRewardsService: was this exact (sessionId, address) pair
+   * proven by a wallet signature recently? Re-verifying (a fresh viewerToken call) extends
+   * the window — a stale, unrenewed join stops counting toward reward eligibility.
+   */
+  isVerifiedViewer(sessionId: string, address: Address, now = Date.now()): boolean {
+    const record = this.verifiedViewers.get(sessionId + ':' + address.toLowerCase())
+    return !!record && record.expiresAt > now
   }
   session(rawVault: string | null, rawAddress: string | null) {
     if (!rawVault || !isAddress(rawVault)) throw new HubError(400, 'INVALID_ADDRESS', 'Supply vaultId.')

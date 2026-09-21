@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { encodeFunctionData, getAddress, isAddress, keccak256, encodePacked, zeroAddress, type Address, type Hex } from 'viem'
+import { decodeEventLog, encodeFunctionData, getAddress, isAddress, keccak256, encodePacked, zeroAddress, type Address, type Hex } from 'viem'
 import type { Market } from '../framework/market.js'
 import type { Journal } from '../framework/journal.js'
 import { HubError } from './manual-swaps.js'
@@ -20,10 +20,16 @@ export interface ViewerAttestation {
 export interface SocialAttestation {
   vault: Address; account: Address; campaignId: string; contributionType: string; score: number; recordedAt: number; reviewedBy: Address
 }
-interface Options { chainId: number; journal: Journal; epochOperator: Address }
+/** Narrow dependency on StreamAuthService — avoids a circular import, and makes the
+ * "viewer must be wallet-verified via a server-issued session" requirement explicit. */
+export interface ViewerSessionVerifier { isVerifiedViewer(sessionId: string, address: Address, now?: number): boolean }
+interface Options { chainId: number; journal: Journal; epochOperator: Address; streamAuth: ViewerSessionVerifier }
 
 const MIN_WATCH_SECONDS = 60
 const MIN_PRESENCE_PROOFS = 2
+/** Caps how many distinct qualifying sessions count toward one account's score per epoch —
+ * without this, a wallet could join unlimited sessions to inflate its share unboundedly. */
+const MAX_QUALIFYING_SESSIONS_PER_ACCOUNT = 5
 
 function account(v: unknown, label = 'wallet'): Address {
   if (typeof v !== 'string' || !isAddress(v) || v.toLowerCase() === zeroAddress) throw new HubError(400, 'INVALID_ADDRESS', 'Enter a valid ' + label + ' address.')
@@ -72,7 +78,15 @@ export class ForeverRewardsService {
     if (market.client.wallet || market.client.account) throw new Error('ForeverRewardsService requires a signer-free Market')
   }
 
-  /** Wallet-signed viewer attendance record. The wallet only attests to its own presence; scoring/eligibility is decided at epoch build time. */
+  /**
+   * Records a viewer's self-reported watch metrics (watch time, interaction proofs) for
+   * an ALREADY wallet-verified session. This call does not itself prove wallet ownership
+   * — that proof happened when the viewer called `POST /api/stream/viewer-token` with a
+   * signed challenge (see StreamAuthService.viewerToken). We require that verification
+   * to still be live (`isVerifiedViewer`) so an attacker can't post fabricated metrics for
+   * a session/wallet pair that never actually authenticated. `sessionId` must be the
+   * server-issued id from stream-auth, not a client-invented string.
+   */
   recordViewerAttestation(input: Record<string, unknown>): ViewerAttestation {
     const allowed = ['vault', 'account', 'sessionId', 'watchSeconds', 'presenceProofs']
     if (Object.keys(input).some((k) => !allowed.includes(k))) throw new HubError(400, 'UNEXPECTED_FIELD', 'Unsupported viewer attestation field.')
@@ -81,9 +95,12 @@ export class ForeverRewardsService {
     const sessionId = typeof input.sessionId === 'string' && input.sessionId.length <= 64 ? input.sessionId : ''
     const watchSeconds = Number(input.watchSeconds)
     const presenceProofs = Number(input.presenceProofs)
-    if (!sessionId) throw new HubError(400, 'INVALID_SESSION', 'Provide a valid session id.')
+    if (!sessionId) throw new HubError(400, 'INVALID_SESSION', 'Provide a valid server-issued session id.')
     if (!Number.isInteger(watchSeconds) || watchSeconds < 0 || watchSeconds > 86400) throw new HubError(400, 'INVALID_WATCH_SECONDS', 'Watch seconds out of bounds.')
     if (!Number.isInteger(presenceProofs) || presenceProofs < 0 || presenceProofs > 1000) throw new HubError(400, 'INVALID_PRESENCE_PROOFS', 'Presence proof count out of bounds.')
+    if (!this.options.streamAuth.isVerifiedViewer(sessionId, acct)) {
+      throw new HubError(403, 'VIEWER_NOT_VERIFIED', 'This wallet has not authenticated a viewer session (POST /api/stream/viewer-token with a wallet signature) recently enough. Self-reported attendance without wallet proof is rejected.')
+    }
     const record: ViewerAttestation = { vault, account: acct, sessionId, watchSeconds, presenceProofs, recordedAt: Date.now() }
     this.options.journal.recordExternalEvent(
       { id: 'forever-viewer:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + acct.toLowerCase() + ':' + sessionId, type: 'forever-viewer-attestation', source: 'hub-forever-rewards', chainId: this.options.chainId, txHash: '', owner: acct, at: record.recordedAt, observedAt: record.recordedAt, status: 'confirmed', verification: 'self-attested', title: 'Viewer attendance recorded', detail: sessionId, data: { ...record } },
@@ -124,22 +141,50 @@ export class ForeverRewardsService {
       .filter((e) => e.source === 'hub-forever-rewards' && String(e.data.vault || '').toLowerCase() === vault.toLowerCase())
   }
 
-  /** Deterministic eligibility scoring: proof-of-participation, not pay-per-second. Viewer and social scores share one weighted pool feeding the single 10% participation pot. Real weighting requires simulation before any mainnet commit. */
+  /**
+   * Deterministic eligibility scoring: proof-of-participation, not pay-per-second.
+   *
+   * Viewer scoring, corrected for two issues spec review caught in the first pass:
+   *  1. Multiple heartbeats for the same (account, sessionId) are DEDUPED to the
+   *     highest reported watchSeconds/presenceProofs for that session, not summed —
+   *     summing every heartbeat let a wallet inflate its score without bound just by
+   *     posting more attestation calls for the same viewing session.
+   *  2. Watch time is transformed with diminishing returns (sqrt), not rewarded
+   *     linearly — doubling watch time does not double reward.
+   *  3. Each account's qualifying-session count is capped
+   *     (MAX_QUALIFYING_SESSIONS_PER_ACCOUNT) so joining unlimited sessions can't
+   *     unboundedly inflate one wallet's share of a single epoch.
+   *
+   * Viewer and social scores share one weighted pool feeding the single 10%
+   * participation pot. Real weighting requires simulation before any mainnet commit.
+   */
   private score(vault: Address): Map<string, number> {
-    const scores = new Map<string, number>()
+    const bestPerSession = new Map<string, { watchSeconds: number; presenceProofs: number }>()
     for (const e of this.viewerAttestations(vault)) {
       const acct = String(e.data.account || '').toLowerCase()
-      if (!isAddress(acct)) continue
+      const sessionId = String(e.data.sessionId || '')
+      if (!isAddress(acct) || !sessionId) continue
+      const key = acct + ':' + sessionId
       const w = Number(e.data.watchSeconds || 0)
       const p = Number(e.data.presenceProofs || 0)
+      const prior = bestPerSession.get(key)
+      if (!prior || w > prior.watchSeconds) bestPerSession.set(key, { watchSeconds: w, presenceProofs: Math.max(p, prior?.presenceProofs ?? 0) })
+    }
+    const sessionsPerAccount = new Map<string, number>()
+    const scores = new Map<string, number>()
+    for (const [key, { watchSeconds: w, presenceProofs: p }] of bestPerSession) {
+      const acct = key.slice(0, key.lastIndexOf(':'))
       if (w < MIN_WATCH_SECONDS || p < MIN_PRESENCE_PROOFS) continue
-      const weight = Math.min(w, 3600) // cap per-session credit; no reward for unattended tabs left open all day
+      const usedSessions = sessionsPerAccount.get(acct) || 0
+      if (usedSessions >= MAX_QUALIFYING_SESSIONS_PER_ACCOUNT) continue
+      sessionsPerAccount.set(acct, usedSessions + 1)
+      const weight = Math.sqrt(Math.min(w, 3600)) // diminishing returns, not linear pay-per-second
       scores.set(acct, (scores.get(acct) || 0) + weight)
     }
     for (const e of this.socialAttestations(vault)) {
       const acct = String(e.data.account || '').toLowerCase()
       if (!isAddress(acct)) continue
-      const weight = Math.min(Number(e.data.score || 0), 100_000)
+      const weight = Math.sqrt(Math.min(Number(e.data.score || 0), 100_000)) // same diminishing-returns principle
       scores.set(acct, (scores.get(acct) || 0) + weight)
     }
     return scores
@@ -172,6 +217,59 @@ export class ForeverRewardsService {
     const event = this.options.journal.externalEvent('forever-participation-allocation:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + root)
     if (!event) throw new HubError(404, 'ALLOCATION_NOT_FOUND', 'No published allocation for this vault and root.')
     return event.data
+  }
+
+  /**
+   * Confirms an epoch commit on-chain and enriches the published allocation with the
+   * fields the spec requires beyond the leaf set: epoch ID, the actual commit
+   * transaction hash, and the on-chain claim deadline (only known once
+   * `commitParticipationEpoch` has actually been mined — `prepareEpoch` runs before the
+   * owner signs anything, so it cannot know these yet). Mirrors the `observeHash`
+   * pattern already used for launch events: a receipt is fetched and its event decoded,
+   * never trusted from the caller.
+   */
+  async observeEpochCommit(vault: Address, hash: Hex) {
+    const rpc = this.market.client.public
+    const receipt = await rpc.getTransactionReceipt({ hash })
+    if (receipt.status !== 'success') throw new HubError(409, 'EPOCH_COMMIT_UNVERIFIED', 'Commit transaction reverted.')
+    let decoded: { eventName: string; args: Record<string, unknown> } | undefined
+    for (const log of receipt.logs) {
+      if (log.address.toLowerCase() !== vault.toLowerCase()) continue
+      try {
+        const candidate = decodeEventLog({ abi: foreverCommunityVaultAbi, data: log.data, topics: log.topics, strict: true }) as { eventName: string; args: Record<string, unknown> }
+        if (candidate.eventName === 'ParticipationEpochCommitted') { decoded = candidate; break }
+      } catch { continue }
+    }
+    if (!decoded) throw new HubError(409, 'EPOCH_COMMIT_UNVERIFIED', 'No ParticipationEpochCommitted event found in this transaction for this vault.')
+    const args = decoded.args as { epochId: bigint; root: Hex; pot: bigint; claimDeadline: bigint }
+    const existing = this.getAllocation(vault, args.root) as Record<string, unknown>
+    const updated = {
+      ...existing,
+      epochId: args.epochId.toString(),
+      transactionHash: hash,
+      blockNumber: receipt.blockNumber.toString(),
+      claimDeadline: args.claimDeadline.toString(),
+      confirmedAt: Date.now(),
+    }
+    this.options.journal.recordExternalEvent(
+      {
+        id: 'forever-participation-allocation:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + args.root,
+        type: 'forever-participation-allocation',
+        source: 'hub-forever-rewards',
+        chainId: this.options.chainId,
+        txHash: hash,
+        owner: null,
+        at: Date.now(),
+        observedAt: Date.now(),
+        status: 'confirmed',
+        verification: 'chain-event',
+        title: 'Participation epoch confirmed on-chain',
+        detail: 'epoch ' + args.epochId.toString(),
+        data: updated,
+      },
+      Number.MAX_SAFE_INTEGER,
+    )
+    return updated
   }
 
   /** Builds the Merkle tree for a reviewed participation epoch (viewers + social combined). Caps proportionally to `potWei` so the sum of leaves never exceeds the on-chain pot. Returns the unsigned commit plan for the owner to review and sign — this never broadcasts. Also publishes the full allocation for public verification. */

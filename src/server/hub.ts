@@ -49,7 +49,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
   const streamAuth=new StreamAuthService(fleet.journal,{chainId:swaps.registry.chainId,forever})
   const foreverEpochOperator=process.env.HUB_FOREVER_EPOCH_OPERATOR
   const foreverRewards=foreverEpochOperator&&/^0x[0-9a-fA-F]{40}$/.test(foreverEpochOperator)
-    ? new ForeverRewardsService(market,{chainId:swaps.registry.chainId,journal:fleet.journal,epochOperator:foreverEpochOperator as `0x${string}`})
+    ? new ForeverRewardsService(market,{chainId:swaps.registry.chainId,journal:fleet.journal,epochOperator:foreverEpochOperator as `0x${string}`,streamAuth})
     : null
   receipts.observeWith(async event=>{await launchpad.observeWallet(event);await launchpadV2.observeWallet(event)})
   const controlToken = randomUUID()
@@ -65,7 +65,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     return secretEqual(auth.slice(7),operatorToken)
   }
   const handle=async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|forever-community\/(?:attest\/(?:viewer|social)|epoch\/prepare|epoch\/allocation)|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
+    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|forever-community\/(?:attest\/(?:viewer|social)|epoch\/(?:prepare|confirm|allocation))|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
     try {
       const origin = req.headers.origin
       if (origin && new URL(origin).host !== req.headers.host) throw new HubError(403, 'ORIGIN_NOT_ALLOWED', 'Use the configured same-origin Hub API proxy.')
@@ -134,6 +134,12 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         const body=await readBody(req)
         if(typeof body.vault!=='string'||typeof body.potWei!=='string')throw new HubError(400,'INVALID_EPOCH_REQUEST','Provide vault and potWei.')
         respond(res,200,await foreverRewards.prepareEpoch(body.vault as `0x${string}`,body.potWei))
+      } else if (path === '/api/forever-community/epoch/confirm' && req.method === 'POST') {
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable participation reward attestation.')
+        if(!authorizedControl(req))throw new HubError(403,'OPERATOR_AUTH_REQUIRED','Confirming a reward epoch requires an authenticated operator session.')
+        const body=await readBody(req)
+        if(typeof body.vault!=='string'||!isAddress(body.vault)||typeof body.hash!=='string'||!/^0x[0-9a-fA-F]{64}$/.test(body.hash))throw new HubError(400,'INVALID_CONFIRM_REQUEST','Provide vault and a transaction hash.')
+        respond(res,200,await foreverRewards.observeEpochCommit(getAddress(body.vault),body.hash as `0x${string}`))
       } else if (path === '/api/forever-community/epoch/allocation' && req.method === 'GET') {
         if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable participation reward attestation.')
         const vault=url.searchParams.get('vault'),root=url.searchParams.get('root')
