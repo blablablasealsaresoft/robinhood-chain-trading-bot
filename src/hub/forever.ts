@@ -8,7 +8,7 @@ import { foreverFactoryAbi, foreverTokenAbi, foreverVaultAbi } from './forever-a
 const SNAPSHOT_LIMIT = 100n
 
 function streamRecord(row: unknown): { host: Address; live: boolean; startedAt: bigint; tipsWei: bigint; claimable: bigint; claimed: bigint; title: string } {
-  const raw = Array.isArray(row)
+  const raw: Record<string, unknown> | null = Array.isArray(row)
     ? { host: row[0], live: row[1], startedAt: row[2], tipsWei: row[3], claimable: row[4], claimed: row[5], title: row[6] }
     : row && typeof row === 'object' ? row as Record<string, unknown> : null
   const host = raw && (raw.host ?? raw.streamer)
