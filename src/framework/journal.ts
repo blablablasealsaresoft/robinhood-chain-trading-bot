@@ -16,7 +16,7 @@ import type { DecisionRecord, EquityPoint, TradeRecord } from './types.js'
 
 export interface WalletPlanRecord {
   id: string; chainId: number; account: string; createdAt: number; expiresAt: number
-  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'|'launch-create'|'launch-contribute'|'launch-claim'|'launch-refund'|'launch-proceeds'|'launch-remainder'|'launch-v2-create'|'launch-v2-contribute'|'launch-v2-claim'|'launch-v2-refund'|'launch-v2-proceeds'|'launch-v2-remainder'|'launch-v2-finalize'|'launch-v2-dust'|'liquidity-add'|'forever-create'|'forever-buy'|'forever-sell'|'forever-depth'|'forever-rewards'|'forever-live'|'forever-end'|'forever-tip'|'forever-stream-claim'|'forever-viewer-epoch-commit'|'forever-social-epoch-commit'; to: string; data: string; value: string }[]
+  actions: { kind: 'approval'|'swap'|'wrap'|'unwrap'|'launch-create'|'launch-contribute'|'launch-claim'|'launch-refund'|'launch-proceeds'|'launch-remainder'|'launch-v2-create'|'launch-v2-contribute'|'launch-v2-claim'|'launch-v2-refund'|'launch-v2-proceeds'|'launch-v2-remainder'|'launch-v2-finalize'|'launch-v2-dust'|'liquidity-add'|'forever-create'|'forever-buy'|'forever-sell'|'forever-depth'|'forever-rewards'|'forever-live'|'forever-end'|'forever-tip'|'forever-stream-claim'|'forever-participation-epoch-commit'; to: string; data: string; value: string }[]
 }
 export interface WalletActivityRecord {
   planId: string; chainId: number; account: string; txHash: string
@@ -39,7 +39,7 @@ export interface AgentStateRecord {
 }
 
 export interface ExternalEventRecord {
-  id:string; type:'bridge'|'launch'|'forever-viewer-attestation'|'forever-social-attestation'; source:string; chainId:number; txHash:string
+  id:string; type:'bridge'|'launch'|'forever-viewer-attestation'|'forever-social-attestation'|'forever-participation-allocation'; source:string; chainId:number; txHash:string
   owner:string|null; at:number; observedAt:number; status:string
   verification:'unverified'|'provider'|'provider-and-receipt'|'chain-event'|'self-attested'|'operator-reviewed'
   title:string; detail:string; data:Record<string,unknown>

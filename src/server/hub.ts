@@ -7,6 +7,7 @@ import { StreamAuthService } from '../hub/stream-auth.js'
 import { BridgeObservations } from '../hub/bridge-observations.js'
 import { NativeWrapService } from '../hub/native-wrap.js'
 import { WalletReceipts } from '../hub/wallet-receipts.js'
+import { isAddress, getAddress } from 'viem'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Fleet } from '../framework/fleet.js'
@@ -64,7 +65,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     return secretEqual(auth.slice(7),operatorToken)
   }
   const handle=async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|forever-community\/(?:attest\/(?:viewer|social)|epoch\/prepare)|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
+    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|forever-community\/(?:attest\/(?:viewer|social)|epoch\/prepare|epoch\/allocation)|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
     try {
       const origin = req.headers.origin
       if (origin && new URL(origin).host !== req.headers.host) throw new HubError(403, 'ORIGIN_NOT_ALLOWED', 'Use the configured same-origin Hub API proxy.')
@@ -128,12 +129,16 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable viewer/social reward attestation.')
         respond(res,200,foreverRewards.recordSocialAttestation(await readBody(req)))
       } else if (path === '/api/forever-community/epoch/prepare' && req.method === 'POST') {
-        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable viewer/social reward attestation.')
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable participation reward attestation.')
         if(!authorizedControl(req))throw new HubError(403,'OPERATOR_AUTH_REQUIRED','Committing a reward epoch requires an authenticated operator session.')
         const body=await readBody(req)
-        const kind=body.kind==='viewer'||body.kind==='social'?body.kind:null
-        if(!kind||typeof body.vault!=='string'||typeof body.potWei!=='string')throw new HubError(400,'INVALID_EPOCH_REQUEST','Provide kind, vault, and potWei.')
-        respond(res,200,await foreverRewards.prepareEpoch(kind,body.vault as `0x${string}`,body.potWei))
+        if(typeof body.vault!=='string'||typeof body.potWei!=='string')throw new HubError(400,'INVALID_EPOCH_REQUEST','Provide vault and potWei.')
+        respond(res,200,await foreverRewards.prepareEpoch(body.vault as `0x${string}`,body.potWei))
+      } else if (path === '/api/forever-community/epoch/allocation' && req.method === 'GET') {
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable participation reward attestation.')
+        const vault=url.searchParams.get('vault'),root=url.searchParams.get('root')
+        if(!vault||!isAddress(vault)||!root)throw new HubError(400,'INVALID_QUERY','Supply vault and root.')
+        respond(res,200,foreverRewards.getAllocation(getAddress(vault),root))
       } else if(path === '/api/forever' && req.method === 'GET') {
         respond(res,200,await forever.status())
       } else if(path === '/api/forever/vaults' && req.method === 'GET') {

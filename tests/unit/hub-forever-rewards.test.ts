@@ -17,6 +17,7 @@ function fakeJournal() {
     decisions,
     recordExternalEvent: vi.fn((e: any) => { events.push(e) }),
     externalEvents: vi.fn((type: string) => events.filter((e) => e.type === type)),
+    externalEvent: vi.fn((id: string) => events.find((e) => e.id === id) || null),
     recordWalletPlan: vi.fn((p: unknown) => { plans.push(p) }),
     recordDecision: vi.fn((d: unknown) => { decisions.push(d) }),
   } as never
@@ -49,15 +50,15 @@ describe('ForeverRewardsService', () => {
   it('rejects viewer attestations below the minimum watch/presence bar when scoring', async () => {
     const { svc } = service()
     svc.recordViewerAttestation({ vault: VAULT, account: A, sessionId: 's1', watchSeconds: 5, presenceProofs: 1 })
-    await expect(svc.prepareEpoch('viewer', VAULT, '1000000000000000')).rejects.toMatchObject({ code: 'NO_ELIGIBLE_PARTICIPANTS' })
+    await expect(svc.prepareEpoch(VAULT, '1000000000000000')).rejects.toMatchObject({ code: 'NO_ELIGIBLE_PARTICIPANTS' })
   })
 
-  it('builds a capped, proportional viewer epoch from eligible attestations and returns an unsigned commit plan', async () => {
+  it('builds a capped, proportional participation epoch combining viewer + social attestations and returns an unsigned commit plan', async () => {
     const { svc, journal } = service()
     svc.recordViewerAttestation({ vault: VAULT, account: A, sessionId: 's1', watchSeconds: 600, presenceProofs: 3 })
-    svc.recordViewerAttestation({ vault: VAULT, account: B, sessionId: 's2', watchSeconds: 300, presenceProofs: 3 })
+    svc.recordSocialAttestation({ vault: VAULT, account: B, campaignId: 'c1', contributionType: 'post', score: 300, reviewedBy: EPOCH_OPERATOR })
     const pot = 900n
-    const result = await svc.prepareEpoch('viewer', VAULT, pot.toString())
+    const result = await svc.prepareEpoch(VAULT, pot.toString())
     expect(result.leaves.length).toBe(2)
     const total = result.leaves.reduce((s, l) => s + BigInt(l.amountWei), 0n)
     expect(total).toBeLessThanOrEqual(pot)
@@ -65,6 +66,15 @@ describe('ForeverRewardsService', () => {
     expect(result.plan.account).toBe(EPOCH_OPERATOR)
     expect(result.plan.transaction.to).toBe(VAULT)
     expect(journal.recordWalletPlan).toHaveBeenCalledTimes(1)
+  })
+
+  it('publishes a public allocation file that getAllocation can retrieve by vault + root', async () => {
+    const { svc } = service()
+    svc.recordViewerAttestation({ vault: VAULT, account: A, sessionId: 's1', watchSeconds: 600, presenceProofs: 3 })
+    const result = await svc.prepareEpoch(VAULT, '500')
+    const allocation = svc.getAllocation(VAULT, result.root) as { leaves: unknown[]; totalWei: string }
+    expect(allocation.leaves).toHaveLength(1)
+    expect(allocation.totalWei).toBe(result.totalWei)
   })
 
   it('rejects social attestations not reviewed by the configured epoch operator', () => {

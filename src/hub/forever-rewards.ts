@@ -5,13 +5,14 @@ import type { Journal } from '../framework/journal.js'
 import { HubError } from './manual-swaps.js'
 import { foreverCommunityVaultAbi } from './forever-community-abi.js'
 
-/// Off-chain scoring → on-chain Merkle commit, for the two participant classes that a
-/// smart contract cannot verify unaided: viewers and social contributors. This module
-/// never signs or broadcasts. It builds the leaves/root/plan; the epoch operator (the
-/// owner's own reviewed wallet — never a hot key) signs the commit like any other Hub
-/// wallet action, through the existing prepare → review → wallet-sign path.
+/// Off-chain scoring → on-chain Merkle commit, for the ONE bucket a smart contract cannot
+/// verify unaided: the combined viewer + social participation pot (10% of the swap fee).
+/// Holders (55%), streamers (15%), sealed depth, and the platform bucket never touch this
+/// module — they stay fully automatic on-chain, per the locked bucket design in
+/// docs/hub/FOREVER-FLAGSHIP.md. This module never signs or broadcasts. It builds the
+/// leaves/root/plan; the epoch operator (the owner's own reviewed wallet — ideally itself
+/// a multisig — never a hot key) signs the commit like any other Hub wallet action.
 
-export type EpochKind = 'viewer' | 'social'
 export interface EpochLeaf { account: Address; amountWei: string }
 export interface ViewerAttestation {
   vault: Address; account: Address; sessionId: string; watchSeconds: number; presenceProofs: number; recordedAt: number
@@ -30,7 +31,7 @@ function account(v: unknown, label = 'wallet'): Address {
 }
 function vaultAddr(v: unknown): Address { return account(v, 'vault') }
 
-/** keccak256(abi.encodePacked(address,uint256)) — must match ForeverCommunityVault._claimEpoch. */
+/** keccak256(abi.encodePacked(address,uint256)) — must match ForeverCommunityVault.claimParticipationReward. */
 export function leafHash(leaf: EpochLeaf): Hex {
   return keccak256(encodePacked(['address', 'uint256'], [leaf.account, BigInt(leaf.amountWei)]))
 }
@@ -112,41 +113,75 @@ export class ForeverRewardsService {
     return record
   }
 
-  private attestations(kind: EpochKind, vault: Address) {
-    const source = 'hub-forever-rewards'
+  private viewerAttestations(vault: Address) {
     return this.options.journal
-      .externalEvents(kind === 'viewer' ? 'forever-viewer-attestation' : 'forever-social-attestation', 5000, this.options.chainId)
-      .filter((e) => e.source === source && String(e.data.vault || '').toLowerCase() === vault.toLowerCase())
+      .externalEvents('forever-viewer-attestation', 5000, this.options.chainId)
+      .filter((e) => e.source === 'hub-forever-rewards' && String(e.data.vault || '').toLowerCase() === vault.toLowerCase())
+  }
+  private socialAttestations(vault: Address) {
+    return this.options.journal
+      .externalEvents('forever-social-attestation', 5000, this.options.chainId)
+      .filter((e) => e.source === 'hub-forever-rewards' && String(e.data.vault || '').toLowerCase() === vault.toLowerCase())
   }
 
-  /** Deterministic eligibility scoring: proof-of-participation, not pay-per-second. Real weighting requires simulation before any mainnet commit. */
-  private score(kind: EpochKind, vault: Address): Map<string, number> {
+  /** Deterministic eligibility scoring: proof-of-participation, not pay-per-second. Viewer and social scores share one weighted pool feeding the single 10% participation pot. Real weighting requires simulation before any mainnet commit. */
+  private score(vault: Address): Map<string, number> {
     const scores = new Map<string, number>()
-    for (const e of this.attestations(kind, vault)) {
+    for (const e of this.viewerAttestations(vault)) {
       const acct = String(e.data.account || '').toLowerCase()
       if (!isAddress(acct)) continue
-      let weight = 0
-      if (kind === 'viewer') {
-        const w = Number(e.data.watchSeconds || 0)
-        const p = Number(e.data.presenceProofs || 0)
-        if (w < MIN_WATCH_SECONDS || p < MIN_PRESENCE_PROOFS) continue
-        weight = Math.min(w, 3600) // cap per-session credit; no reward for unattended tabs left open all day
-      } else {
-        weight = Math.min(Number(e.data.score || 0), 100_000)
-      }
+      const w = Number(e.data.watchSeconds || 0)
+      const p = Number(e.data.presenceProofs || 0)
+      if (w < MIN_WATCH_SECONDS || p < MIN_PRESENCE_PROOFS) continue
+      const weight = Math.min(w, 3600) // cap per-session credit; no reward for unattended tabs left open all day
+      scores.set(acct, (scores.get(acct) || 0) + weight)
+    }
+    for (const e of this.socialAttestations(vault)) {
+      const acct = String(e.data.account || '').toLowerCase()
+      if (!isAddress(acct)) continue
+      const weight = Math.min(Number(e.data.score || 0), 100_000)
       scores.set(acct, (scores.get(acct) || 0) + weight)
     }
     return scores
   }
 
-  /** Builds the Merkle tree for a reviewed epoch. Caps proportionally to `potWei` so the sum of leaves never exceeds the on-chain pot. Returns the unsigned commit plan for the owner to review and sign — this never broadcasts. */
-  async prepareEpoch(kind: EpochKind, vault: Address, potWei: string): Promise<{
-    kind: EpochKind; vault: Address; root: Hex; leafCount: number; totalWei: string
-    leaves: EpochLeaf[]; plan: { kind: 'forever-rewards-epoch-plan'; signing: 'user-wallet'; planId: string; chainId: number; account: Address; transaction: { to: Address; data: Hex; value: string }; expiresAt: number }
+  /** Persists the full leaf set keyed by root so anyone can independently reconstruct the tree and verify aggregation — the "public allocation file" requirement. */
+  private publishAllocation(vault: Address, root: Hex, leaves: EpochLeaf[], totalWei: string, planId: string) {
+    this.options.journal.recordExternalEvent(
+      {
+        id: 'forever-participation-allocation:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + root,
+        type: 'forever-participation-allocation',
+        source: 'hub-forever-rewards',
+        chainId: this.options.chainId,
+        txHash: '',
+        owner: null,
+        at: Date.now(),
+        observedAt: Date.now(),
+        status: 'prepared',
+        verification: 'operator-reviewed',
+        title: 'Participation epoch allocation published',
+        detail: leaves.length + ' leaves, ' + totalWei + ' wei',
+        data: { vault, root, leaves, totalWei, planId },
+      },
+      Number.MAX_SAFE_INTEGER,
+    )
+  }
+
+  /** Public read: returns the full allocation for a committed/prepared epoch root so anyone can verify it against the on-chain commit. */
+  getAllocation(vault: Address, root: string) {
+    const event = this.options.journal.externalEvent('forever-participation-allocation:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + root)
+    if (!event) throw new HubError(404, 'ALLOCATION_NOT_FOUND', 'No published allocation for this vault and root.')
+    return event.data
+  }
+
+  /** Builds the Merkle tree for a reviewed participation epoch (viewers + social combined). Caps proportionally to `potWei` so the sum of leaves never exceeds the on-chain pot. Returns the unsigned commit plan for the owner to review and sign — this never broadcasts. Also publishes the full allocation for public verification. */
+  async prepareEpoch(vault: Address, potWei: string): Promise<{
+    vault: Address; root: Hex; leafCount: number; totalWei: string; leaves: EpochLeaf[]
+    plan: { kind: 'forever-rewards-epoch-plan'; signing: 'user-wallet'; planId: string; chainId: number; account: Address; transaction: { to: Address; data: Hex; value: string }; expiresAt: number }
   }> {
     const pot = BigInt(potWei)
     if (pot <= 0n) throw new HubError(400, 'INVALID_POT', 'Pot amount must be positive.')
-    const scores = this.score(kind, vault)
+    const scores = this.score(vault)
     if (!scores.size) throw new HubError(404, 'NO_ELIGIBLE_PARTICIPANTS', 'No wallet met the minimum eligibility bar for this epoch.')
     const totalScore = [...scores.values()].reduce((s, v) => s + v, 0)
     const leaves: EpochLeaf[] = [...scores.entries()].map(([addr, weight]) => ({
@@ -159,13 +194,14 @@ export class ForeverRewardsService {
     const rpc = this.market.client.public
     const code = await rpc.getCode({ address: vault })
     if (!code || code === '0x') throw new HubError(503, 'VAULT_UNAVAILABLE', 'No contract exists at this vault address.')
-    const data = encodeFunctionData({ abi: foreverCommunityVaultAbi, functionName: kind === 'viewer' ? 'commitViewerEpoch' : 'commitSocialEpoch', args: [root, total] })
+    const data = encodeFunctionData({ abi: foreverCommunityVaultAbi, functionName: 'commitParticipationEpoch', args: [root, total] })
     const now = Date.now()
     const planId = randomUUID()
-    this.options.journal.recordWalletPlan({ id: planId, chainId: this.options.chainId, account: this.options.epochOperator, createdAt: now, expiresAt: now + 300_000, actions: [{ kind: kind === 'viewer' ? 'forever-viewer-epoch-commit' : 'forever-social-epoch-commit', to: vault, data, value: '0' }] })
-    this.options.journal.recordDecision({ agentId: 'hub:forever-rewards', ts: now, kind: 'observe', detail: kind + ' epoch prepared: ' + leaves.length + ' leaves, ' + total.toString() + ' wei', meta: { planId, vault, kind, root, leafCount: leaves.length, totalWei: total.toString() } })
+    this.options.journal.recordWalletPlan({ id: planId, chainId: this.options.chainId, account: this.options.epochOperator, createdAt: now, expiresAt: now + 300_000, actions: [{ kind: 'forever-participation-epoch-commit', to: vault, data, value: '0' }] })
+    this.options.journal.recordDecision({ agentId: 'hub:forever-rewards', ts: now, kind: 'observe', detail: 'Participation epoch prepared: ' + leaves.length + ' leaves, ' + total.toString() + ' wei', meta: { planId, vault, root, leafCount: leaves.length, totalWei: total.toString() } })
+    this.publishAllocation(vault, root, leaves, total.toString(), planId)
     return {
-      kind, vault, root, leafCount: leaves.length, totalWei: total.toString(), leaves,
+      vault, root, leafCount: leaves.length, totalWei: total.toString(), leaves,
       plan: { kind: 'forever-rewards-epoch-plan', signing: 'user-wallet', planId, chainId: this.options.chainId, account: this.options.epochOperator, transaction: { to: vault, data, value: '0' }, expiresAt: now + 300_000 },
     }
   }
