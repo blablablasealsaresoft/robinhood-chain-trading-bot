@@ -58,7 +58,7 @@ export class StreamAuthService {
     const sig = createHmac('sha256', this.mintSecret).update(body).digest('base64url')
     return body + '.' + sig
   }
-  private livekitJwt(room: string, identity: string, canPublish: boolean) {
+  private livekitJwt(room: string, identity: string, canPublishTracks: boolean, canPublishData = canPublishTracks) {
     const key = process.env.LIVEKIT_API_KEY
     const secret = process.env.LIVEKIT_API_SECRET
     if (!key || !secret) return null
@@ -70,7 +70,7 @@ export class StreamAuthService {
       sub: identity,
       nbf: now - 10,
       exp: now + Math.floor(TOKEN_TTL_MS / 1000),
-      video: { roomJoin: true, room, canPublish, canSubscribe: true, canPublishData: canPublish },
+      video: { roomJoin: true, room, canPublish: canPublishTracks, canSubscribe: true, canPublishData },
     }
     const body = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')
     const sig = createHmac('sha256', secret).update(header + '.' + body).digest('base64url')
@@ -153,7 +153,7 @@ export class StreamAuthService {
     const session = this.getOrCreateSession(vaultId, address)
     session.mediaState = 'publisher-connected'
     const hubToken = this.mint({ role: 'publish', vaultId, address, sessionId: session.sessionId, room: session.providerRoomId }, TOKEN_TTL_MS)
-    const livekit = this.livekitJwt(session.providerRoomId, address.toLowerCase(), true)
+    const livekit = this.livekitJwt(session.providerRoomId, address.toLowerCase(), true, true)
     return {
       role: 'publish' as const,
       provider: PROVIDER,
@@ -202,7 +202,8 @@ export class StreamAuthService {
     this.verifiedViewers.set(sessionId + ':' + address.toLowerCase(), { sessionId, address, verifiedAt: now, expiresAt: now + VIEWER_VERIFICATION_TTL_MS })
     session.mediaState = session.mediaState === 'idle' ? 'playable' : session.mediaState
     const hubToken = this.mint({ role: 'viewer', vaultId, sessionId, room: session.providerRoomId, address }, TOKEN_TTL_MS)
-    const livekit = this.livekitJwt(session.providerRoomId, address.toLowerCase(), false)
+    const livekitIdentity = address.toLowerCase() + ':viewer:' + nonce.slice(0, 8)
+    const livekit = this.livekitJwt(session.providerRoomId, livekitIdentity, false, true)
     return {
       role: 'viewer' as const,
       provider: PROVIDER,
@@ -213,6 +214,7 @@ export class StreamAuthService {
       livekitToken: livekit,
       livekitUrl: process.env.LIVEKIT_URL || null,
       mediaState: session.mediaState,
+      livekitIdentity,
     }
   }
   /**
