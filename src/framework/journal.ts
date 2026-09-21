@@ -39,7 +39,7 @@ export interface AgentStateRecord {
 }
 
 export interface ExternalEventRecord {
-  id:string; type:'bridge'|'launch'|'forever-viewer-attestation'|'forever-social-attestation'|'forever-participation-allocation'; source:string; chainId:number; txHash:string
+  id:string; type:'bridge'|'launch'|'forever-viewer-attestation'|'forever-social-attestation'|'forever-participation-allocation'|'forever-campaign'|'forever-excluded-account'; source:string; chainId:number; txHash:string
   owner:string|null; at:number; observedAt:number; status:string
   verification:'unverified'|'provider'|'provider-and-receipt'|'chain-event'|'self-attested'|'operator-reviewed'
   title:string; detail:string; data:Record<string,unknown>

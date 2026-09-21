@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { LaunchpadV2Service } from '../../src/hub/launchpad-v2.js'
 import { StreamAuthService } from '../../src/hub/stream-auth.js'
@@ -48,5 +49,28 @@ describe('StreamAuthService', () => {
         providerRoomId: 'forged',
       } as never),
     ).rejects.toMatchObject({ code: 'UNEXPECTED_FIELD' })
+  })
+
+  it('requires a signed viewer-token challenge, not a self-reported address', async () => {
+    const forever = { list: vi.fn(async () => ({ vaults: [] })) } as never
+    const auth = new StreamAuthService(journal(), { chainId: 4663, forever })
+    await expect(
+      auth.viewerToken({ vaultId: '0x1111111111111111111111111111111111111111', sessionId: 's1', address: '0x2222222222222222222222222222222222222222' }),
+    ).rejects.toMatchObject({ code: 'INVALID_SIGNATURE' })
+  })
+
+  it('rejects a LiveKit webhook without a valid HMAC signature, accepts one with a valid signature, and updates mediaState', () => {
+    process.env.LIVEKIT_WEBHOOK_SECRET = 'test-secret'
+    const forever = { list: vi.fn(async () => ({ vaults: [] })) } as never
+    const auth = new StreamAuthService(journal(), { chainId: 4663, forever })
+    const body = JSON.stringify({ event: 'room_finished', room: { name: 'forever:vault:host:sess1' } })
+    expect(auth.verifyWebhookSignature(body, undefined)).toBe(false)
+    expect(auth.verifyWebhookSignature(body, 'wrong-signature')).toBe(false)
+    const validSig = createHmac('sha256', 'test-secret').update(body).digest('base64')
+    expect(auth.verifyWebhookSignature(body, validSig)).toBe(true)
+    // Unknown room: handled=false, no throw.
+    const result = auth.handleLiveKitEvent({ event: 'room_finished', room: { name: 'forever:vault:host:sess1' } })
+    expect(result.handled).toBe(false)
+    delete process.env.LIVEKIT_WEBHOOK_SECRET
   })
 })

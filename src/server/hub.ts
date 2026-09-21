@@ -65,7 +65,7 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
     return secretEqual(auth.slice(7),operatorToken)
   }
   const handle=async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|forever-community\/(?:attest\/(?:viewer|social)|epoch\/(?:prepare|confirm|allocation))|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
+    if (!/^\/api\/(status|health|shadow\/status|assets|market\/(?:series|activity|depth)|quote|swap|wrap|liquidity(?:\/prepare)?|launches|launchpad(?:\/(?:sales|prepare))?|launchpad-v2(?:\/(?:sales|prepare))?|forever(?:\/(?:prepare|vaults))?|stream\/(?:challenge|publish-token|viewer-token|session)|forever-community\/(?:attest\/(?:viewer|social)|epoch\/(?:prepare|confirm|allocation)|campaigns?|exclude)|stream\/webhook\/livekit|portfolio(?:\/history)?|positions|activity(?:\/verify)?|bridges\/verify|risk|kill|strategies(?:\/[^/]+(?:\/(?:start|stop))?)?|stocks\/[^/]+)$/.test(url.pathname)) return false
     try {
       const origin = req.headers.origin
       if (origin && new URL(origin).host !== req.headers.host) throw new HubError(403, 'ORIGIN_NOT_ALLOWED', 'Use the configured same-origin Hub API proxy.')
@@ -145,6 +145,25 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
         const vault=url.searchParams.get('vault'),root=url.searchParams.get('root')
         if(!vault||!isAddress(vault)||!root)throw new HubError(400,'INVALID_QUERY','Supply vault and root.')
         respond(res,200,foreverRewards.getAllocation(getAddress(vault),root))
+      } else if (path === '/api/forever-community/campaigns' && req.method === 'GET') {
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable viewer/social reward attestation.')
+        const vault=url.searchParams.get('vault')
+        if(!vault||!isAddress(vault))throw new HubError(400,'INVALID_QUERY','Supply vault.')
+        respond(res,200,{vault,campaigns:foreverRewards.listCampaigns(getAddress(vault))})
+      } else if (path === '/api/forever-community/campaigns' && req.method === 'POST') {
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable viewer/social reward attestation.')
+        if(!authorizedControl(req))throw new HubError(403,'OPERATOR_AUTH_REQUIRED','Creating a campaign requires an authenticated operator session.')
+        respond(res,200,foreverRewards.createCampaign(await readBody(req)))
+      } else if (path === '/api/forever-community/exclude' && req.method === 'POST') {
+        if(!foreverRewards)throw new HubError(503,'FOREVER_REWARDS_NOT_CONFIGURED','Set HUB_FOREVER_EPOCH_OPERATOR to enable viewer/social reward attestation.')
+        if(!authorizedControl(req))throw new HubError(403,'OPERATOR_AUTH_REQUIRED','Excluding an account requires an authenticated operator session.')
+        respond(res,200,foreverRewards.excludeAccount(await readBody(req)))
+      } else if (path === '/api/stream/webhook/livekit' && req.method === 'POST') {
+        const raw=await readRawBody(req)
+        if(!streamAuth.verifyWebhookSignature(raw,req.headers['x-livekit-signature'] as string|undefined))throw new HubError(401,'BAD_WEBHOOK_SIGNATURE','LiveKit webhook signature did not verify.')
+        let payload:{event?:string;room?:{name?:string};participant?:{identity?:string}}
+        try{payload=JSON.parse(raw)}catch{throw new HubError(400,'INVALID_JSON','Webhook body is not valid JSON.')}
+        respond(res,200,streamAuth.handleLiveKitEvent(payload))
       } else if(path === '/api/forever' && req.method === 'GET') {
         respond(res,200,await forever.status())
       } else if(path === '/api/forever/vaults' && req.method === 'GET') {
@@ -248,6 +267,17 @@ export function createHubHandler(fleet: Fleet, service?: ManualSwapService, opti
 export function respond(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
   res.end(JSON.stringify(body, (_, value) => typeof value === 'bigint' ? value.toString() : value))
+}
+async function readRawBody(req: IncomingMessage): Promise<string> {
+  if (Number(req.headers['content-length']) > 16384) throw new HubError(413, 'BODY_TOO_LARGE', 'Webhook body exceeds 16384 bytes.')
+  let size = 0
+  const chunks: Buffer[] = []
+  for await (const chunk of req) {
+    size += Buffer.byteLength(chunk)
+    if (size > 16384) throw new HubError(413, 'BODY_TOO_LARGE', 'Webhook body exceeds 16384 bytes.')
+    chunks.push(Buffer.from(chunk))
+  }
+  return Buffer.concat(chunks).toString('utf8')
 }
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   if (req.headers['content-type']?.split(';')[0]?.trim() !== 'application/json') throw new HubError(415, 'CONTENT_TYPE', 'Use application/json.')

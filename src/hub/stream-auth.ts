@@ -224,6 +224,57 @@ export class StreamAuthService {
     const record = this.verifiedViewers.get(sessionId + ':' + address.toLowerCase())
     return !!record && record.expiresAt > now
   }
+
+  /**
+   * Verifies a LiveKit webhook signature (HMAC-SHA256 over the raw request body using
+   * LIVEKIT_WEBHOOK_SECRET, falling back to LIVEKIT_API_SECRET). This is what closes the
+   * "goLive() != actually broadcasting" gap: mediaState now reflects LiveKit's own
+   * participant/track events instead of only the optimistic state set when a token was
+   * minted. Never trust a browser-reported disconnect — only the provider's own webhook.
+   */
+  verifyWebhookSignature(rawBody: string, signatureHeader: string | undefined): boolean {
+    const secret = process.env.LIVEKIT_WEBHOOK_SECRET || process.env.LIVEKIT_API_SECRET
+    if (!secret || !signatureHeader) return false
+    const expected = createHmac('sha256', secret).update(rawBody).digest('base64')
+    const a = Buffer.from(signatureHeader)
+    const b = Buffer.from(expected)
+    return a.length === b.length && timingSafeEqual(a, b)
+  }
+
+  /**
+   * Handles a verified LiveKit webhook event. Updates `mediaState` from the provider's
+   * own reporting of participant/track lifecycle — this is the independent connectivity
+   * signal the contract's on-chain `goLive` deliberately does not (and should not) assume.
+   */
+  handleLiveKitEvent(payload: { event?: string; room?: { name?: string }; participant?: { identity?: string } }) {
+    const roomName = payload.room?.name || ''
+    const session = [...this.sessions.values()].find((s) => s.providerRoomId === roomName)
+    if (!session) return { handled: false as const, reason: 'unknown-room' }
+    const identity = (payload.participant?.identity || '').toLowerCase()
+    const isHost = identity === session.host.toLowerCase()
+    switch (payload.event) {
+      case 'track_published':
+        if (isHost) session.mediaState = 'publisher-connected'
+        break
+      case 'participant_left':
+        if (isHost) session.mediaState = 'idle' // publisher disconnected; on-chain endLive is a separate, explicit user action
+        break
+      case 'room_finished':
+        session.mediaState = 'ended'
+        session.endedAt = Date.now()
+        break
+      default:
+        return { handled: false as const, reason: 'ignored-event' }
+    }
+    this.journal.recordDecision({
+      agentId: 'hub:stream',
+      ts: Date.now(),
+      kind: 'observe',
+      detail: 'LiveKit webhook applied: ' + payload.event,
+      meta: { sessionId: session.sessionId, event: payload.event, mediaState: session.mediaState },
+    })
+    return { handled: true as const, sessionId: session.sessionId, mediaState: session.mediaState }
+  }
   session(rawVault: string | null, rawAddress: string | null) {
     if (!rawVault || !isAddress(rawVault)) throw new HubError(400, 'INVALID_ADDRESS', 'Supply vaultId.')
     const vaultId = getAddress(rawVault)

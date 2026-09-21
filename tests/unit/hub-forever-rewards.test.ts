@@ -112,6 +112,7 @@ describe('ForeverRewardsService', () => {
     const { svc, journal, streamAuth } = service()
     streamAuth.mark('s1', A)
     svc.recordViewerAttestation({ vault: VAULT, account: A, sessionId: 's1', watchSeconds: 600, presenceProofs: 3 })
+    svc.createCampaign({ vault: VAULT, id: 'c1', description: 'test campaign', contributionTypes: ['post'], maxScoreBudget: 10_000, startAt: Date.now() - 1000, endAt: Date.now() + 86_400_000, createdBy: EPOCH_OPERATOR })
     svc.recordSocialAttestation({ vault: VAULT, account: B, campaignId: 'c1', contributionType: 'post', score: 300, reviewedBy: EPOCH_OPERATOR })
     const pot = 900n
     const result = await svc.prepareEpoch(VAULT, pot.toString())
@@ -151,5 +152,92 @@ describe('ForeverRewardsService', () => {
     const { svc, market } = service()
     ;(market as any).client.public.getTransactionReceipt.mockResolvedValue({ status: 'success', logs: [], blockNumber: 1n })
     await expect(svc.observeEpochCommit(VAULT, ('0x' + '22'.repeat(32)) as `0x${string}`)).rejects.toMatchObject({ code: 'EPOCH_COMMIT_UNVERIFIED' })
+  })
+
+  describe('campaign registry', () => {
+    function campaign(svc: ForeverRewardsService, over: Record<string, unknown> = {}) {
+      return svc.createCampaign({ vault: VAULT, id: 'launch-week', description: 'Launch week promo', contributionTypes: ['post', 'referral'], maxScoreBudget: 1000, startAt: Date.now() - 1000, endAt: Date.now() + 86_400_000, createdBy: EPOCH_OPERATOR, ...over })
+    }
+
+    it('rejects social attestations against a campaign that does not exist — no "post once = guaranteed reward"', () => {
+      const { svc } = service()
+      expect(() => svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'nope', contributionType: 'post', score: 10, reviewedBy: EPOCH_OPERATOR })).toThrowError(/no active campaign/i)
+    })
+
+    it('rejects a contribution type the campaign does not allow', () => {
+      const { svc } = service()
+      campaign(svc)
+      expect(() => svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'launch-week', contributionType: 'unrelated-type', score: 10, reviewedBy: EPOCH_OPERATOR })).toThrowError(/does not accept/)
+    })
+
+    it('rejects attestations outside the campaign window', () => {
+      const { svc } = service()
+      campaign(svc, { startAt: Date.now() - 20_000, endAt: Date.now() - 10_000 })
+      expect(() => svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'launch-week', contributionType: 'post', score: 10, reviewedBy: EPOCH_OPERATOR })).toThrowError(/outside its active window/)
+    })
+
+    it('caps score to whatever budget remains instead of overshooting, and exhausts cleanly', () => {
+      const { svc } = service()
+      campaign(svc, { maxScoreBudget: 100 })
+      const first = svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'launch-week', contributionType: 'post', score: 80, reviewedBy: EPOCH_OPERATOR })
+      expect(first.score).toBe(80)
+      const second = svc.recordSocialAttestation({ vault: VAULT, account: B, campaignId: 'launch-week', contributionType: 'post', score: 80, reviewedBy: EPOCH_OPERATOR })
+      expect(second.score).toBe(20) // partial credit — only 20 remained of the 100 budget
+      expect(() => svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'launch-week', contributionType: 'post', score: 5, reviewedBy: EPOCH_OPERATOR })).toThrowError(/budget is fully allocated/)
+    })
+
+    it('rejects self-referrals', () => {
+      const { svc } = service()
+      campaign(svc)
+      expect(() => svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'launch-week', contributionType: 'referral', score: 10, reviewedBy: EPOCH_OPERATOR, referredAccount: A })).toThrowError(/self-referral/i)
+    })
+
+    it('rejects duplicate content resubmitted for the same wallet and campaign', () => {
+      const { svc } = service()
+      campaign(svc)
+      const contentHash = 'a'.repeat(64)
+      svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'launch-week', contributionType: 'post', score: 10, reviewedBy: EPOCH_OPERATOR, contentHash })
+      expect(() => svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'launch-week', contributionType: 'post', score: 10, reviewedBy: EPOCH_OPERATOR, contentHash })).toThrowError(/already been credited/)
+    })
+
+    it('only the reviewed epoch operator may create a campaign', () => {
+      const { svc } = service()
+      expect(() => campaign(svc, { createdBy: A })).toThrowError(/reviewed epoch operator/)
+    })
+  })
+
+  describe('exclusion', () => {
+    it('excluded accounts are skipped from scoring even with otherwise-eligible attestations', async () => {
+      const { svc, streamAuth } = service()
+      streamAuth.mark('s1', A)
+      streamAuth.mark('s2', B)
+      svc.recordViewerAttestation({ vault: VAULT, account: A, sessionId: 's1', watchSeconds: 600, presenceProofs: 3 })
+      svc.recordViewerAttestation({ vault: VAULT, account: B, sessionId: 's2', watchSeconds: 600, presenceProofs: 3 })
+      svc.excludeAccount({ vault: VAULT, account: A, reviewedBy: EPOCH_OPERATOR, excluded: true })
+      const result = await svc.prepareEpoch(VAULT, '1000')
+      expect(result.leaves).toHaveLength(1)
+      expect(result.leaves[0]!.account.toLowerCase()).toBe(B.toLowerCase())
+    })
+
+    it('only the reviewed epoch operator may exclude an account', () => {
+      const { svc } = service()
+      expect(() => svc.excludeAccount({ vault: VAULT, account: A, reviewedBy: A, excluded: true })).toThrowError(/reviewed epoch operator/)
+    })
+  })
+
+  describe('rate limiting', () => {
+    it('rejects excessive viewer heartbeats from the same wallet', () => {
+      const { svc, streamAuth } = service()
+      streamAuth.mark('s1', A)
+      for (let i = 0; i < 12; i++) svc.recordViewerAttestation({ vault: VAULT, account: A, sessionId: 's1', watchSeconds: 100 + i, presenceProofs: 3 })
+      expect(() => svc.recordViewerAttestation({ vault: VAULT, account: A, sessionId: 's1', watchSeconds: 200, presenceProofs: 3 })).toThrowError(/too many viewer heartbeats/i)
+    })
+
+    it('rejects excessive social attestations from the same wallet', () => {
+      const { svc } = service()
+      svc.createCampaign({ vault: VAULT, id: 'c', description: 'd', contributionTypes: ['post'], maxScoreBudget: 1_000_000, startAt: Date.now() - 1000, endAt: Date.now() + 86_400_000, createdBy: EPOCH_OPERATOR })
+      for (let i = 0; i < 20; i++) svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'c', contributionType: 'post', score: 1, reviewedBy: EPOCH_OPERATOR })
+      expect(() => svc.recordSocialAttestation({ vault: VAULT, account: A, campaignId: 'c', contributionType: 'post', score: 1, reviewedBy: EPOCH_OPERATOR })).toThrowError(/too many social attestations/i)
+    })
   })
 })

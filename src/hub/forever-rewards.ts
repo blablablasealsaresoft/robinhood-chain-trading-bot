@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { decodeEventLog, encodeFunctionData, getAddress, isAddress, keccak256, encodePacked, zeroAddress, type Address, type Hex } from 'viem'
 import type { Market } from '../framework/market.js'
 import type { Journal } from '../framework/journal.js'
 import { HubError } from './manual-swaps.js'
 import { foreverCommunityVaultAbi } from './forever-community-abi.js'
+import { RateLimiter } from './rate-limiter.js'
 
 /// Off-chain scoring → on-chain Merkle commit, for the ONE bucket a smart contract cannot
 /// verify unaided: the combined viewer + social participation pot (10% of the swap fee).
@@ -19,6 +20,11 @@ export interface ViewerAttestation {
 }
 export interface SocialAttestation {
   vault: Address; account: Address; campaignId: string; contributionType: string; score: number; recordedAt: number; reviewedBy: Address
+  contentHash?: string; referredAccount?: Address
+}
+export interface Campaign {
+  id: string; vault: Address; description: string; contributionTypes: string[]
+  maxScoreBudget: number; awardedScore: number; startAt: number; endAt: number; createdBy: Address; active: boolean
 }
 /** Narrow dependency on StreamAuthService — avoids a circular import, and makes the
  * "viewer must be wallet-verified via a server-issued session" requirement explicit. */
@@ -74,6 +80,13 @@ export function buildMerkleTree(leaves: EpochLeaf[]): { root: Hex; proofs: Map<s
 }
 
 export class ForeverRewardsService {
+  /** Anti-bot: per-wallet call-rate limits on the two attestation surfaces. Neither
+   * limit is a substitute for the wallet-signature/campaign checks below — it just
+   * bounds how fast one wallet can hammer the endpoints. */
+  private viewerLimiter = new RateLimiter(60_000, 12) // 12 heartbeats/min/wallet
+  private socialLimiter = new RateLimiter(3_600_000, 20) // 20 social attestations/hour/wallet
+  private excluded = new Set<string>() // 'vault:account' — cluster-excluded before an epoch closes
+
   constructor(private market: Market, private options: Options) {
     if (market.client.wallet || market.client.account) throw new Error('ForeverRewardsService requires a signer-free Market')
   }
@@ -85,7 +98,8 @@ export class ForeverRewardsService {
    * signed challenge (see StreamAuthService.viewerToken). We require that verification
    * to still be live (`isVerifiedViewer`) so an attacker can't post fabricated metrics for
    * a session/wallet pair that never actually authenticated. `sessionId` must be the
-   * server-issued id from stream-auth, not a client-invented string.
+   * server-issued id from stream-auth, not a client-invented string. Rate-limited per
+   * wallet to bound heartbeat spam independent of the scoring-side dedup.
    */
   recordViewerAttestation(input: Record<string, unknown>): ViewerAttestation {
     const allowed = ['vault', 'account', 'sessionId', 'watchSeconds', 'presenceProofs']
@@ -101,6 +115,7 @@ export class ForeverRewardsService {
     if (!this.options.streamAuth.isVerifiedViewer(sessionId, acct)) {
       throw new HubError(403, 'VIEWER_NOT_VERIFIED', 'This wallet has not authenticated a viewer session (POST /api/stream/viewer-token with a wallet signature) recently enough. Self-reported attendance without wallet proof is rejected.')
     }
+    if (!this.viewerLimiter.allow(acct.toLowerCase())) throw new HubError(429, 'RATE_LIMITED', 'Too many viewer heartbeats from this wallet. Slow down.')
     const record: ViewerAttestation = { vault, account: acct, sessionId, watchSeconds, presenceProofs, recordedAt: Date.now() }
     this.options.journal.recordExternalEvent(
       { id: 'forever-viewer:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + acct.toLowerCase() + ':' + sessionId, type: 'forever-viewer-attestation', source: 'hub-forever-rewards', chainId: this.options.chainId, txHash: '', owner: acct, at: record.recordedAt, observedAt: record.recordedAt, status: 'confirmed', verification: 'self-attested', title: 'Viewer attendance recorded', detail: sessionId, data: { ...record } },
@@ -109,22 +124,113 @@ export class ForeverRewardsService {
     return record
   }
 
-  /** Reviewed social/community campaign attestation — must be attributed to an operator-reviewed campaign, not scored automatically from third-party APIs. */
+  /**
+   * Creates a campaign with an explicit criteria set, a hard score budget, and a
+   * fixed window — never "post once, guaranteed reward." Only the reviewed epoch
+   * operator may create campaigns.
+   */
+  createCampaign(input: Record<string, unknown>): Campaign {
+    const allowed = ['vault', 'id', 'description', 'contributionTypes', 'maxScoreBudget', 'startAt', 'endAt', 'createdBy']
+    if (Object.keys(input).some((k) => !allowed.includes(k))) throw new HubError(400, 'UNEXPECTED_FIELD', 'Unsupported campaign field.')
+    const vault = vaultAddr(input.vault)
+    const createdBy = account(input.createdBy, 'creator')
+    if (createdBy.toLowerCase() !== this.options.epochOperator.toLowerCase()) throw new HubError(403, 'UNREVIEWED_CAMPAIGN', 'Campaigns must be created by the reviewed epoch operator.')
+    const id = typeof input.id === 'string' && /^[a-z0-9-]{1,64}$/.test(input.id) ? input.id : ''
+    if (!id) throw new HubError(400, 'INVALID_CAMPAIGN_ID', 'Campaign id must be lowercase alphanumeric/hyphen, 1-64 chars.')
+    if (this.getCampaign(vault, id)) throw new HubError(409, 'CAMPAIGN_EXISTS', 'A campaign with this id already exists for this vault.')
+    const description = typeof input.description === 'string' && input.description.length <= 500 ? input.description : ''
+    const contributionTypes = Array.isArray(input.contributionTypes) ? input.contributionTypes.filter((t): t is string => typeof t === 'string' && t.length <= 64) : []
+    const maxScoreBudget = Number(input.maxScoreBudget)
+    const startAt = Number(input.startAt)
+    const endAt = Number(input.endAt)
+    if (!description) throw new HubError(400, 'INVALID_CAMPAIGN', 'Provide a description.')
+    if (!contributionTypes.length) throw new HubError(400, 'INVALID_CAMPAIGN', 'Provide at least one allowed contributionType.')
+    if (!Number.isFinite(maxScoreBudget) || maxScoreBudget <= 0 || maxScoreBudget > 10_000_000) throw new HubError(400, 'INVALID_BUDGET', 'maxScoreBudget out of bounds.')
+    if (!Number.isInteger(startAt) || !Number.isInteger(endAt) || endAt <= startAt) throw new HubError(400, 'INVALID_WINDOW', 'endAt must be after startAt.')
+    const campaign: Campaign = { id, vault, description, contributionTypes, maxScoreBudget, awardedScore: 0, startAt, endAt, createdBy, active: true }
+    this.saveCampaign(campaign)
+    return campaign
+  }
+  private campaignKey(vault: Address, id: string) { return 'forever-campaign:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + id }
+  private saveCampaign(c: Campaign) {
+    this.options.journal.recordExternalEvent(
+      { id: this.campaignKey(c.vault, c.id), type: 'forever-campaign', source: 'hub-forever-rewards', chainId: this.options.chainId, txHash: '', owner: c.createdBy, at: Date.now(), observedAt: Date.now(), status: c.active ? 'active' : 'closed', verification: 'operator-reviewed', title: 'Campaign ' + c.id, detail: c.description, data: { ...c } },
+      Number.MAX_SAFE_INTEGER,
+    )
+  }
+  getCampaign(vault: Address, id: string): Campaign | null {
+    const event = this.options.journal.externalEvent(this.campaignKey(vault, id))
+    return event ? (event.data as unknown as Campaign) : null
+  }
+  listCampaigns(vault: Address): Campaign[] {
+    return this.options.journal.externalEvents('forever-campaign', 500, this.options.chainId)
+      .filter((e) => e.source === 'hub-forever-rewards' && String(e.data.vault || '').toLowerCase() === vault.toLowerCase())
+      .map((e) => e.data as unknown as Campaign)
+  }
+  /** Operator-only: exclude a suspicious wallet from a vault's participation scoring before an epoch closes. Reversible; does not touch already-committed epochs. */
+  excludeAccount(input: Record<string, unknown>): { vault: Address; account: Address; excluded: boolean } {
+    const allowed = ['vault', 'account', 'reviewedBy', 'excluded']
+    if (Object.keys(input).some((k) => !allowed.includes(k))) throw new HubError(400, 'UNEXPECTED_FIELD', 'Unsupported exclusion field.')
+    const vault = vaultAddr(input.vault)
+    const acct = account(input.account)
+    const reviewedBy = account(input.reviewedBy, 'reviewer')
+    if (reviewedBy.toLowerCase() !== this.options.epochOperator.toLowerCase()) throw new HubError(403, 'UNREVIEWED_EXCLUSION', 'Exclusions require the reviewed epoch operator.')
+    const excluded = input.excluded !== false
+    const key = vault.toLowerCase() + ':' + acct.toLowerCase()
+    if (excluded) this.excluded.add(key)
+    else this.excluded.delete(key)
+    this.options.journal.recordExternalEvent(
+      { id: 'forever-excluded-account:' + this.options.chainId + ':' + key, type: 'forever-excluded-account', source: 'hub-forever-rewards', chainId: this.options.chainId, txHash: '', owner: acct, at: Date.now(), observedAt: Date.now(), status: excluded ? 'excluded' : 'reinstated', verification: 'operator-reviewed', title: excluded ? 'Account excluded from participation scoring' : 'Account reinstated', detail: vault + ':' + acct, data: { vault, account: acct, excluded, reviewedBy } },
+      Number.MAX_SAFE_INTEGER,
+    )
+    return { vault, account: acct, excluded }
+  }
+  private isExcluded(vault: Address, acct: string): boolean { return this.excluded.has(vault.toLowerCase() + ':' + acct.toLowerCase()) }
+
+  /**
+   * Reviewed social/community campaign attestation. Enforces the required controls
+   * spec review called for: the campaign must exist, be active, and be within its
+   * window; the contribution type must be one the campaign explicitly allows; scores
+   * are capped to whatever budget remains (never exceeding the campaign's hard cap,
+   * partial credit on the last contribution rather than overshoot); self-referrals are
+   * rejected; and duplicate content (same contentHash from the same account) cannot be
+   * resubmitted for repeated credit.
+   */
   recordSocialAttestation(input: Record<string, unknown>): SocialAttestation {
-    const allowed = ['vault', 'account', 'campaignId', 'contributionType', 'score', 'reviewedBy']
+    const allowed = ['vault', 'account', 'campaignId', 'contributionType', 'score', 'reviewedBy', 'contentHash', 'referredAccount']
     if (Object.keys(input).some((k) => !allowed.includes(k))) throw new HubError(400, 'UNEXPECTED_FIELD', 'Unsupported social attestation field.')
     const vault = vaultAddr(input.vault)
     const acct = account(input.account)
     const reviewedBy = account(input.reviewedBy, 'reviewer')
     if (reviewedBy.toLowerCase() !== this.options.epochOperator.toLowerCase()) throw new HubError(403, 'UNREVIEWED_ATTESTATION', 'Social attestations require the reviewed epoch operator.')
+    if (!this.socialLimiter.allow(acct.toLowerCase())) throw new HubError(429, 'RATE_LIMITED', 'Too many social attestations for this wallet.')
     const campaignId = typeof input.campaignId === 'string' && input.campaignId.length <= 64 ? input.campaignId : ''
     const contributionType = typeof input.contributionType === 'string' && input.contributionType.length <= 64 ? input.contributionType : ''
-    const score = Number(input.score)
+    let score = Number(input.score)
     if (!campaignId || !contributionType) throw new HubError(400, 'INVALID_CAMPAIGN', 'Provide campaignId and contributionType.')
-    if (!Number.isFinite(score) || score < 0 || score > 1_000_000) throw new HubError(400, 'INVALID_SCORE', 'Score out of bounds.')
-    const record: SocialAttestation = { vault, account: acct, campaignId, contributionType, score, recordedAt: Date.now(), reviewedBy }
+    if (!Number.isFinite(score) || score <= 0 || score > 1_000_000) throw new HubError(400, 'INVALID_SCORE', 'Score out of bounds.')
+    const campaign = this.getCampaign(vault, campaignId)
+    if (!campaign || !campaign.active) throw new HubError(404, 'CAMPAIGN_NOT_FOUND', 'No active campaign with this id for this vault. "Post once = guaranteed reward" is not supported — create a campaign first.')
+    const now = Date.now()
+    if (now < campaign.startAt || now > campaign.endAt) throw new HubError(422, 'CAMPAIGN_CLOSED', 'This campaign is outside its active window.')
+    if (!campaign.contributionTypes.includes(contributionType)) throw new HubError(422, 'CONTRIBUTION_TYPE_NOT_ALLOWED', 'This campaign does not accept that contribution type.')
+    const referredAccount = input.referredAccount !== undefined ? account(input.referredAccount, 'referred wallet') : undefined
+    if (referredAccount && referredAccount.toLowerCase() === acct.toLowerCase()) throw new HubError(422, 'SELF_REFERRAL', 'Self-referrals are not eligible.')
+    const contentHash = typeof input.contentHash === 'string' && /^[0-9a-f]{16,128}$/i.test(input.contentHash) ? input.contentHash.toLowerCase() : undefined
+    if (contentHash) {
+      const dupKey = campaignId + ':' + acct.toLowerCase() + ':' + contentHash
+      const existing = this.options.journal.externalEvent('forever-social:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + createHash('sha256').update(dupKey).digest('hex'))
+      if (existing) throw new HubError(409, 'DUPLICATE_CONTENT', 'This content has already been credited for this campaign and wallet.')
+    }
+    const remaining = campaign.maxScoreBudget - campaign.awardedScore
+    if (remaining <= 0) throw new HubError(422, 'CAMPAIGN_BUDGET_EXHAUSTED', 'This campaign\'s score budget is fully allocated.')
+    if (score > remaining) score = remaining // partial credit on the last contribution, never overshoot the cap
+    campaign.awardedScore += score
+    this.saveCampaign(campaign)
+    const record: SocialAttestation = { vault, account: acct, campaignId, contributionType, score, recordedAt: now, reviewedBy, contentHash, referredAccount }
+    const idSuffix = contentHash ? createHash('sha256').update(campaignId + ':' + acct.toLowerCase() + ':' + contentHash).digest('hex') : campaignId + ':' + randomUUID()
     this.options.journal.recordExternalEvent(
-      { id: 'forever-social:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + acct.toLowerCase() + ':' + campaignId, type: 'forever-social-attestation', source: 'hub-forever-rewards', chainId: this.options.chainId, txHash: '', owner: acct, at: record.recordedAt, observedAt: record.recordedAt, status: 'confirmed', verification: 'operator-reviewed', title: 'Social contribution recorded', detail: campaignId + ':' + contributionType, data: { ...record } },
+      { id: 'forever-social:' + this.options.chainId + ':' + vault.toLowerCase() + ':' + idSuffix, type: 'forever-social-attestation', source: 'hub-forever-rewards', chainId: this.options.chainId, txHash: '', owner: acct, at: record.recordedAt, observedAt: record.recordedAt, status: 'confirmed', verification: 'operator-reviewed', title: 'Social contribution recorded', detail: campaignId + ':' + contributionType, data: { ...record } },
       Number.MAX_SAFE_INTEGER,
     )
     return record
@@ -163,7 +269,7 @@ export class ForeverRewardsService {
     for (const e of this.viewerAttestations(vault)) {
       const acct = String(e.data.account || '').toLowerCase()
       const sessionId = String(e.data.sessionId || '')
-      if (!isAddress(acct) || !sessionId) continue
+      if (!isAddress(acct) || !sessionId || this.isExcluded(vault, acct)) continue
       const key = acct + ':' + sessionId
       const w = Number(e.data.watchSeconds || 0)
       const p = Number(e.data.presenceProofs || 0)
@@ -183,7 +289,7 @@ export class ForeverRewardsService {
     }
     for (const e of this.socialAttestations(vault)) {
       const acct = String(e.data.account || '').toLowerCase()
-      if (!isAddress(acct)) continue
+      if (!isAddress(acct) || this.isExcluded(vault, acct)) continue
       const weight = Math.sqrt(Math.min(Number(e.data.score || 0), 100_000)) // same diminishing-returns principle
       scores.set(acct, (scores.get(acct) || 0) + weight)
     }
